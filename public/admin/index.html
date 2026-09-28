@@ -31,13 +31,15 @@
   .btn-full { width:100%; justify-content:center; }
 
   /* ---- dashboard chrome ---- */
-  .topbar { display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+  .topbar { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
     padding-bottom:18px; border-bottom:1px solid var(--line); margin-bottom:26px; }
-  .topbar .title { font-family:var(--serif); font-size:22px; }
+  .tb-left { display:flex; flex-direction:column; gap:2px; margin-right:auto; min-width:0; }
+  .topbar .title { font-family:var(--serif); font-size:clamp(19px,2.6vw,24px); line-height:1.2; }
   .topbar .title .gold-text { font-weight:700; }
-  .who { color:var(--sub); font-size:13.5px; }
-  .integrity { font-size:12px; font-weight:800; letter-spacing:1px; padding:5px 12px;
-    border-radius:20px; text-transform:uppercase; }
+  .who { color:var(--sub); font-size:13px; overflow-wrap:anywhere; }
+  .tb-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .integrity { font-size:11.5px; font-weight:800; letter-spacing:1px; padding:5px 12px;
+    border-radius:20px; text-transform:uppercase; white-space:nowrap; }
   .integrity.ok { background:rgba(52,211,153,.14); border:1px solid rgba(52,211,153,.5); color:var(--green); }
   .integrity.bad { background:rgba(248,113,113,.14); border:1px solid rgba(248,113,113,.5); color:var(--red); }
 
@@ -45,9 +47,10 @@
   .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:16px; margin-bottom:26px; }
   .kpi { padding:20px; }
   .kpi .label { font-size:11.5px; letter-spacing:1.6px; text-transform:uppercase; color:var(--sub); font-weight:700; }
-  .kpi .value { font-family:var(--serif); font-size:30px; margin-top:8px; color:var(--ink); }
+  .kpi .value { font-family:var(--serif); font-size:clamp(22px,2.4vw,30px); margin-top:8px; color:var(--ink);
+    overflow-wrap:anywhere; }
   .kpi .value.gold { color:var(--gold-hi); }
-  .kpi .foot { font-size:12.5px; color:var(--sub); margin-top:4px; }
+  .kpi .kfoot { font-size:12.5px; color:var(--sub); margin-top:4px; overflow-wrap:anywhere; }
 
   /* ---- panels / charts ---- */
   .grid2 { display:grid; grid-template-columns:1.4fr 1fr; gap:18px; margin-bottom:18px; }
@@ -67,11 +70,12 @@
   th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line-soft); }
   th { font-size:11px; letter-spacing:1px; text-transform:uppercase; color:var(--sub); font-weight:700; }
   td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
-  .rank { display:flex; align-items:center; gap:10px; margin-bottom:11px; }
-  .rank .nm { flex:1; font-size:13.5px; }
-  .rank .track { flex:2; height:9px; background:#0b0b10; border-radius:6px; overflow:hidden; border:1px solid var(--line-soft); }
+  .rank { display:flex; align-items:center; gap:10px; margin-bottom:11px; min-width:0; }
+  .rank .nm { flex:1; font-size:13.5px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rank .track { flex:2; height:9px; background:#0b0b10; border-radius:6px; overflow:hidden; border:1px solid var(--line-soft); flex:none; width:38%; }
   .rank .fill { height:100%; background:var(--gold-grad); }
-  .rank .amt { width:110px; text-align:right; font-variant-numeric:tabular-nums; color:var(--sub); font-size:12.5px; }
+  .rank .amt { flex:none; max-width:42%; text-align:right; font-variant-numeric:tabular-nums; color:var(--sub); font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .nodata { color:var(--sub); font-size:13.5px; padding:26px 0; text-align:center; }
 
   .pill-row { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
   .pill { font-size:12px; padding:5px 12px; border-radius:20px; background:#0b0b10;
@@ -88,6 +92,23 @@
   .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; color:var(--sub); }
   .sec-title { font-family:var(--serif); font-size:18px; margin:30px 0 14px; color:var(--ink); }
   .spin { color:var(--sub); font-size:14px; padding:40px; text-align:center; }
+
+  /* ---- responsive ---- */
+  @media (max-width:720px) {
+    .shell { padding:18px 14px 60px; }
+    .topbar { align-items:flex-start; }
+    .tb-left { margin-right:0; width:100%; }
+    .tb-actions { width:100%; }
+    .tb-actions .btn { flex:1; justify-content:center; }
+    .kpis { grid-template-columns:1fr 1fr; gap:12px; }
+    .card { padding:16px; }
+    .audit-wrap td, .audit-wrap th { padding:8px 8px; }
+  }
+  @media (max-width:440px) {
+    .kpis { grid-template-columns:1fr; }
+    .exports { flex-direction:column; }
+    .bar-lbl { font-size:9.5px; }
+  }
 </style>
 </head>
 <body>
@@ -116,14 +137,15 @@
 <!-- ================= DASHBOARD ================= -->
 <div id="dash" class="shell hidden">
   <div class="topbar">
-    <div>
+    <div class="tb-left">
       <div class="title">PRAXIS <span class="gold-text">Intelligence</span></div>
       <div class="who">signed in as <strong id="who">—</strong></div>
     </div>
-    <div class="spacer" style="flex:1"></div>
-    <span id="integrity" class="integrity ok">log intact</span>
-    <button class="btn btn-ghost" id="refresh">Refresh</button>
-    <button class="btn btn-ghost" id="logout">Sign out</button>
+    <div class="tb-actions">
+      <span id="integrity" class="integrity ok">log intact</span>
+      <button class="btn btn-ghost" id="refresh">Refresh</button>
+      <button class="btn btn-ghost" id="logout">Sign out</button>
+    </div>
   </div>
 
   <div id="loading" class="spin">Crunching the ledger…</div>
@@ -237,12 +259,19 @@
   function kpi(label, value, foot, gold) {
     return '<div class="kpi panel"><div class="label">' + esc(label) + '</div>' +
       '<div class="value' + (gold ? ' gold' : '') + '">' + esc(value) + '</div>' +
-      '<div class="foot">' + esc(foot || "") + '</div></div>';
+      '<div class="kfoot">' + esc(foot || "") + '</div></div>';
   }
 
   function renderBars(months) {
+    var el = $("bars");
+    if (!months || !months.length || months.every(function (m) { return !m.spend; })) {
+      el.style.height = "auto";
+      el.innerHTML = '<div class="nodata">No purchase data yet — add entries in the app to see trends.</div>';
+      return;
+    }
+    el.style.height = "";
     var max = Math.max.apply(null, months.map(function (m) { return m.spend; }).concat([1]));
-    $("bars").innerHTML = months.map(function (m) {
+    el.innerHTML = months.map(function (m) {
       var h = Math.round((m.spend / max) * 100);
       var lbl = m.month.slice(2).replace("-", "/");
       return '<div class="bar-col"><div class="bar" style="height:' + h + '%">' +
