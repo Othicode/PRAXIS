@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="PW Budget icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#1a1a21"/>
+      <stop offset="1" stop-color="#0a0a0e"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f7e7a8"/>
+      <stop offset="0.5" stop-color="#d4af37"/>
+      <stop offset="1" stop-color="#a8842a"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.55" r="0.6">
+      <stop offset="0" stop-color="#d4af37" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#d4af37" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- onyx rounded tile (same corner feel as the app icon) -->
+  <rect x="0" y="0" width="512" height="512" rx="110" fill="url(#bg)"/>
+  <rect x="0" y="0" width="512" height="512" rx="110" fill="url(#glow)"/>
+
+  <!-- ascending budget bars -->
+  <rect x="92"  y="292" width="66" height="112" rx="12" fill="url(#gold)"/>
+  <rect x="190" y="232" width="66" height="172" rx="12" fill="url(#gold)"/>
+  <rect x="288" y="168" width="66" height="236" rx="12" fill="url(#gold)"/>
+
+  <!-- baseline ledger rule (echoes the app icon's underline) -->
+  <rect x="92" y="424" width="328" height="26" rx="13" fill="url(#gold)"/>
+
+  <!-- cedi coin -->
+  <circle cx="376" cy="128" r="66" fill="url(#gold)"/>
+  <path d="M399 103 A34 34 0 1 0 399 153" fill="none" stroke="#0a0a0e"
+        stroke-width="15" stroke-linecap="round"/>
+  <line x1="376" y1="84" x2="376" y2="172" stroke="#0a0a0e"
+        stroke-width="15" stroke-linecap="round"/>
+</svg>

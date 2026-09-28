@@ -262,6 +262,14 @@ img { max-width:100%; }
   .nav { display:none; }
   .foot-grid { grid-template-columns:1fr; }
 }
+@media (max-width:480px) {
+  .wrap { padding:0 18px; }
+  .pyr-stage { transform:scale(.78); }   /* keep the 3D scene inside narrow phones */
+  .hero { padding:64px 0 56px; }
+  .top .wrap { gap:14px; }
+  .brand-sub, .logo-sep { display:none; }  /* nowrap tagline would overflow phones */
+  .btn-big { padding:13px 22px; font-size:15px; }
+}
 @media (prefers-reduced-motion:reduce) {
   *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; }
 }

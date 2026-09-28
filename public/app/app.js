@@ -1305,25 +1305,53 @@ async function init() {
 }
 
 /* ---------- update notification ----------
-   When a new version ships (bump CACHE in sw.js + redeploy), installed
-   apps get a "tap to update" banner instead of silently reloading. */
+   Offline-first: the installed app always opens from cache. When the device
+   comes back online and a newer build exists (CACHE bumped in sw.js), we pull
+   it and apply it automatically; if still offline, a "tap to update" banner
+   waits until there's a connection. */
 function initUpdateCheck(reg) {
-  const showBanner = () => {
+  let autoReloadArmed = false;
+  sessionStorage.removeItem("pw.sw.reload");   // allow one guarded reload per session
+
+  const banner = (msg, tapToApply) => {
     const b = $("#update-banner");
-    if (!b || !b.hidden) return;
+    if (!b) return;
+    b.textContent = msg;
     b.hidden = false;
-    b.onclick = () => location.reload();
+    b.onclick = tapToApply ? () => location.reload() : null;
   };
+
+  const applyUpdate = () => {
+    if (!navigator.onLine) { banner("Update ready — tap to install", true); return; }
+    banner("Updating to the latest version…", false);
+    autoReloadArmed = true;
+    // the new worker skipWaiting()s on install, so nudge it to take control
+    if (reg.waiting) reg.waiting.postMessage("skip-waiting");
+    setTimeout(() => location.reload(), 900);
+  };
+
   reg.addEventListener("updatefound", () => {
     const nw = reg.installing;
     if (!nw) return;
     nw.addEventListener("statechange", () => {
       // "installed" with an existing controller = update, not first install
-      if (nw.state === "installed" && navigator.serviceWorker.controller) showBanner();
+      if (nw.state === "installed" && navigator.serviceWorker.controller) applyUpdate();
     });
   });
+
+  // If a new worker took control while we weren't watching (background tab),
+  // reload once so the fresh assets actually run.
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (autoReloadArmed) return;
+    if (navigator.onLine && sessionStorage.getItem("pw.sw.reload") !== "1") {
+      sessionStorage.setItem("pw.sw.reload", "1");
+      setTimeout(() => location.reload(), 400);
+    }
+  });
+
   const recheck = () => { try { reg.update(); } catch (e) { /* offline */ } };
-  setInterval(recheck, 3 * 60 * 60 * 1000);          // hourly while open
+  window.addEventListener("online", recheck);            // grab updates on reconnect
+  setInterval(recheck, 3 * 60 * 60 * 1000);               // hourly while open
   document.addEventListener("visibilitychange", () => { if (!document.hidden) recheck(); });
 }
 
