@@ -19,13 +19,19 @@ Data model
 """
 
 import calendar
+import csv
 import datetime as dt
+import hashlib
+import hmac
+import io
 import json
 import os
 import random
 import re
+import secrets
 import sqlite3
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -64,6 +70,22 @@ for _arg in sys.argv[1:]:
 PAYMENT_METHODS = ["Cash", "Bank Transfer", "Mobile Money", "Credit"]
 UNIT_SUGGESTIONS = ["bag", "roll", "pack", "set", "bottle", "kg",
                     "box", "piece", "litre", "carton", "can"]
+
+# ---------------------------------------------------------------------------
+# Admin (single-user) configuration
+# ---------------------------------------------------------------------------
+# The /admin directory is gated behind one account. The FIRST person to open
+# /admin signs up (username + password) and that locks the account — no further
+# signups are possible. You can instead pre-seed the account with env vars:
+#   PWBUDGET_ADMIN_USER / PWBUDGET_ADMIN_PASS
+# Sessions are random tokens stored in the DB and delivered via an HttpOnly
+# cookie. The audit_log table is a hash chain, so any edit to a past entry
+# breaks verification (useful for legal / accounting records).
+COOKIE_NAME = "pwadmin_session"
+SESSION_DAYS = 7
+PBKDF2_ROUNDS = 200_000
+MAX_FAILED_LOGINS = 8            # per IP before a cooldown kicks in
+LOGIN_COOLDOWN_SEC = 300
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS branches (
@@ -121,6 +143,30 @@ CREATE TABLE IF NOT EXISTS budgets (
 CREATE INDEX IF NOT EXISTS idx_purch_date   ON purchases(date);
 CREATE INDEX IF NOT EXISTS idx_purch_branch ON purchases(branch_id);
 CREATE INDEX IF NOT EXISTS idx_purch_product ON purchases(product_id);
+CREATE TABLE IF NOT EXISTS admin_user (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    username   TEXT NOT NULL,
+    pass_salt  TEXT NOT NULL,
+    pass_hash  TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT PRIMARY KEY,
+    username   TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts        TEXT NOT NULL,
+    actor     TEXT NOT NULL,
+    action    TEXT NOT NULL,
+    detail    TEXT NOT NULL DEFAULT '',
+    ip        TEXT NOT NULL DEFAULT '',
+    prev_hash TEXT NOT NULL DEFAULT '',
+    row_hash  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
 """
 
 
@@ -164,6 +210,152 @@ def _month_bounds(year, month):
     first = dt.date(year, month, 1)
     last = dt.date(year, month, calendar.monthrange(year, month)[1])
     return first, last
+
+
+# ---------------------------------------------------------------------------
+# Auth (single admin user) + tamper-evident audit log
+# ---------------------------------------------------------------------------
+_LOGIN_ATTEMPTS = {}             # ip -> [count, first_ts]
+_LOGIN_LOCK = threading.Lock()
+
+
+def _utcnow():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def _hash_password(password, salt_hex):
+    return hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), PBKDF2_ROUNDS
+    ).hex()
+
+
+def admin_exists(conn):
+    return conn.execute("SELECT 1 FROM admin_user WHERE id = 1").fetchone() is not None
+
+
+def create_admin_user(conn, username, password):
+    salt = secrets.token_hex(16)
+    conn.execute(
+        "INSERT INTO admin_user(id, username, pass_salt, pass_hash) VALUES (1,?,?,?)",
+        (username, salt, _hash_password(password, salt)),
+    )
+    conn.commit()
+
+
+def verify_admin(conn, username, password):
+    row = conn.execute("SELECT username, pass_salt, pass_hash FROM admin_user WHERE id = 1").fetchone()
+    if not row:
+        return None
+    if not hmac.compare_digest(row["username"], username or ""):
+        return None
+    if not hmac.compare_digest(_hash_password(password or "", row["pass_salt"]), row["pass_hash"]):
+        return None
+    return row["username"]
+
+
+def create_session(conn, username):
+    token = secrets.token_urlsafe(32)
+    exp = (_utcnow() + dt.timedelta(days=SESSION_DAYS)).isoformat()
+    conn.execute(
+        "INSERT INTO sessions(token, username, expires_at) VALUES (?,?,?)",
+        (token, username, exp),
+    )
+    conn.commit()
+    return token
+
+
+def get_session(conn, token):
+    if not token:
+        return None
+    row = conn.execute("SELECT username, expires_at FROM sessions WHERE token = ?", (token,)).fetchone()
+    if not row:
+        return None
+    try:
+        exp = dt.datetime.fromisoformat(row["expires_at"])
+    except ValueError:
+        exp = _utcnow()
+    if exp < _utcnow():
+        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.commit()
+        return None
+    return row["username"]
+
+
+def destroy_session(conn, token):
+    if token:
+        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.commit()
+
+
+def _throttle_check(ip):
+    """Return seconds to wait (0 if allowed). Sliding window brute-force guard."""
+    now = _utcnow().timestamp()
+    with _LOGIN_LOCK:
+        rec = _LOGIN_ATTEMPTS.get(ip)
+        if not rec or now - rec[1] > LOGIN_COOLDOWN_SEC:
+            return 0
+        if rec[0] >= MAX_FAILED_LOGINS:
+            return int(LOGIN_COOLDOWN_SEC - (now - rec[1]))
+        return 0
+
+
+def _throttle_fail(ip):
+    now = _utcnow().timestamp()
+    with _LOGIN_LOCK:
+        rec = _LOGIN_ATTEMPTS.get(ip)
+        if not rec or now - rec[1] > LOGIN_COOLDOWN_SEC:
+            _LOGIN_ATTEMPTS[ip] = [1, now]
+        else:
+            rec[0] += 1
+
+
+def _throttle_clear(ip):
+    with _LOGIN_LOCK:
+        _LOGIN_ATTEMPTS.pop(ip, None)
+
+
+def audit(conn, actor, action, detail="", ip=""):
+    """Append a hash-chained entry. Returns the new row_hash."""
+    detail = (detail or "")[:500]
+    last = conn.execute("SELECT row_hash FROM audit_log ORDER BY id DESC LIMIT 1").fetchone()
+    prev = last["row_hash"] if last else ""
+    ts = _utcnow().isoformat(timespec="seconds")
+    row_hash = hashlib.sha256(f"{prev}|{ts}|{actor}|{action}|{detail}".encode("utf-8")).hexdigest()
+    conn.execute(
+        "INSERT INTO audit_log(ts, actor, action, detail, ip, prev_hash, row_hash)"
+        " VALUES (?,?,?,?,?,?,?)",
+        (ts, actor or "anonymous", action, detail, ip or "", prev, row_hash),
+    )
+    conn.commit()
+    return row_hash
+
+
+def audit_list(conn, limit=200, offset=0):
+    limit = min(1000, max(1, limit))
+    rows = conn.execute(
+        "SELECT id, ts, actor, action, detail, ip, row_hash FROM audit_log"
+        " ORDER BY id DESC LIMIT ? OFFSET ?",
+        (limit, offset),
+    ).fetchall()
+    total = conn.execute("SELECT COUNT(*) c FROM audit_log").fetchone()["c"]
+    return {"rows": [dict(r) for r in rows], "total": total}
+
+
+def audit_verify(conn):
+    """Walk the chain oldest->newest; any edit/insert/delete breaks it."""
+    prev = ""
+    count = 0
+    for r in conn.execute("SELECT id, ts, actor, action, detail, prev_hash, row_hash"
+                          " FROM audit_log ORDER BY id ASC").fetchall():
+        expected = hashlib.sha256(
+            f"{r['prev_hash']}|{r['ts']}|{r['actor']}|{r['action']}|{r['detail']}".encode("utf-8")
+        ).hexdigest()
+        if r["prev_hash"] != prev or expected != r["row_hash"]:
+            return {"ok": False, "broken_at": r["id"], "verified": count}
+        prev = r["row_hash"]
+        count += 1
+    return {"ok": True, "verified": count}
+
 
 
 # ---------------------------------------------------------------------------
@@ -666,6 +858,79 @@ def meta(conn):
 
 
 # ---------------------------------------------------------------------------
+# Export (CSV / JSON) - all readable business records for research / legal
+# ---------------------------------------------------------------------------
+EXPORT_KINDS = ("purchases", "credits", "budgets", "audit", "analytics")
+
+
+def _records_from(rows):
+    out = []
+    for r in rows:
+        d = dict(r)
+        for k, v in list(d.items()):
+            if isinstance(v, (list, dict)):
+                d[k] = json.dumps(v, ensure_ascii=False)
+        out.append(d)
+    return out
+
+
+def export_records(conn, kind, branch_id=None):
+    """Return an ordered list of flat dict records for the given export kind."""
+    if kind == "purchases":
+        rows = conn.execute(
+            """SELECT p.id, p.date, b.name AS branch, d.name AS distributor,
+                      p.product_name AS product, p.unit, p.quantity, p.unit_price,
+                      p.total_amount, p.payment_method, p.credit_total, p.credit_paid,
+                      p.memo, p.created_at
+               FROM purchases p
+               LEFT JOIN branches b ON b.id = p.branch_id
+               LEFT JOIN distributors d ON d.id = p.distributor_id
+               ORDER BY p.date DESC, p.id DESC"""
+        ).fetchall()
+        return _records_from(rows)
+    if kind == "credits":
+        recs = []
+        for c in credit_stats(conn, branch_id=branch_id):
+            d = dict(c)
+            d["payments"] = json.dumps(d.get("payments", []), ensure_ascii=False)
+            recs.append(d)
+        return recs
+    if kind == "budgets":
+        rows = conn.execute(
+            """SELECT bu.id, bu.year, bu.month, b.name AS branch, bu.total_amount,
+                      bu.save_amount, bu.allocations_json AS allocations, bu.updated_at
+               FROM budgets bu LEFT JOIN branches b ON b.id = bu.branch_id
+               ORDER BY bu.year DESC, bu.month DESC"""
+        ).fetchall()
+        return _records_from(rows)
+    if kind == "audit":
+        rows = conn.execute(
+            "SELECT id, ts, actor, action, detail, ip, prev_hash, row_hash"
+            " FROM audit_log ORDER BY id DESC"
+        ).fetchall()
+        return _records_from(rows)
+    if kind == "analytics":
+        return [analytics(conn, branch_id=branch_id, months=12)]
+    return None
+
+
+def to_csv(records):
+    if not records:
+        return ""
+    cols = []
+    for rec in records:
+        for k in rec.keys():
+            if k not in cols:
+                cols.append(k)
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w.writeheader()
+    for rec in records:
+        w.writerow(rec)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
 # HTTP layer
 # ---------------------------------------------------------------------------
 MIME = {
@@ -695,8 +960,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def send_json(self, obj, status=200):
-        self._send(json.dumps(obj, ensure_ascii=False), status)
+    def send_json(self, obj, status=200, headers=None):
+        self._send(json.dumps(obj, ensure_ascii=False), status, extra=headers)
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -709,8 +974,37 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return None
 
+    # -- cookies / identity ---------------------------------------------------
+    def _cookie(self, name):
+        raw = self.headers.get("Cookie")
+        if not raw:
+            return None
+        for part in raw.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == name:
+                return v or None
+        return None
+
+    def _cookie_header(self, value, max_age=None):
+        parts = [f"{COOKIE_NAME}={value}", "Path=/", "HttpOnly", "SameSite=Lax"]
+        parts.append(f"Max-Age={SESSION_DAYS * 86400 if max_age is None else max_age}")
+        if self.headers.get("X-Forwarded-Proto") == "https":
+            parts.append("Secure")
+        return "; ".join(parts)
+
+    def _ip(self):
+        fwd = self.headers.get("X-Forwarded-For")
+        if fwd:
+            return fwd.split(",")[0].strip()[:45]
+        return self.address_string()
+
+    def _actor(self, conn):
+        return get_session(conn, self._cookie(COOKIE_NAME)) or "app"
+
     def _api(self, method, path, qs, payload):
         conn = get_db()
+        actor = self._actor(conn)
+        ip = self._ip()
         try:
             # ---- meta & misc ---------------------------------------------
             if path == "/api/health":
@@ -730,6 +1024,7 @@ class Handler(BaseHTTPRequestHandler):
                 except sqlite3.IntegrityError:
                     return self.send_json({"error": "branch already exists"}, 400)
                 conn.commit()
+                audit(conn, actor, "branch.create", f"id={cur.lastrowid} name={name}", ip)
                 self.send_json({"ok": True, "id": cur.lastrowid, "name": name}, 201)
                 return
 
@@ -757,6 +1052,7 @@ class Handler(BaseHTTPRequestHandler):
                         return self.send_json({"error": "branch_id required"}, 400)
                     conn.execute("UPDATE purchases SET branch_id = ? WHERE id = ?", (bid, pid))
                     conn.commit()
+                    audit(conn, actor, "purchase.move", f"id={pid} -> branch {bid}", ip)
                     self.send_json({"ok": True, "id": pid})
                     return
                 # pay toward credit
@@ -777,6 +1073,7 @@ class Handler(BaseHTTPRequestHandler):
                     (pid, date.isoformat(), amount, str(payload.get("memo") or "").strip()[:120]),
                 )
                 conn.commit()
+                audit(conn, actor, "credit.payment", f"purchase {pid} +{amount}", ip)
                 self.send_json({"ok": True, "id": pid, "credit": credit_stats(conn, purchase_id=pid)[0]}, 201)
                 return
 
@@ -787,6 +1084,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error": "purchase not found"}, 404)
                 conn.execute("DELETE FROM purchases WHERE id = ?", (pid,))
                 conn.commit()
+                audit(conn, actor, "purchase.delete", f"id={pid}", ip)
                 return self.send_json({"ok": True})
 
             # ---- credits ----------------------------------------------------------
@@ -842,6 +1140,8 @@ class Handler(BaseHTTPRequestHandler):
                     (bid, year, month, total, save, json.dumps(alloc, ensure_ascii=False)),
                 )
                 conn.commit()
+                audit(conn, actor, "budget.save",
+                      f"{year:04d}-{month:02d} branch={bid} total={total} save={save}", ip)
                 return self.send_json({"ok": True, **budget_view(conn, bid, year, month)})
 
             return self.send_json({"error": "not found"}, 404)
@@ -912,16 +1212,145 @@ class Handler(BaseHTTPRequestHandler):
              unit_price, pm, credit_total, credit_paid, memo),
         )
         conn.commit()
+        audit(conn, self._actor(conn), "purchase.create",
+              f"id={cur.lastrowid} {product_raw} qty={qty} total={total} method={pm}",
+              self._ip())
         cs = None
         if pm == "Credit":
             cs = credit_stats(conn, purchase_id=cur.lastrowid)[0]
         return self.send_json({"ok": True, "id": cur.lastrowid, "credit": cs}, 201)
 
+    # -- protected admin API (single user) ------------------------------------
+    def _admin_api(self, method, path, qs, payload):
+        conn = get_db()
+        try:
+            ip = self._ip()
+            token = self._cookie(COOKIE_NAME)
+            actor = get_session(conn, token)
+
+            # public: session probe
+            if path == "/admin/api/session" and method == "GET":
+                return self.send_json({
+                    "authed": bool(actor), "username": actor,
+                    "signup_required": not admin_exists(conn),
+                })
+
+            # public: first-run signup (locks the single account)
+            if path == "/admin/api/signup" and method == "POST":
+                if admin_exists(conn):
+                    return self.send_json({"error": "account already created"}, 403)
+                username = str((payload or {}).get("username") or "").strip()[:40]
+                password = str((payload or {}).get("password") or "")
+                if len(username) < 3:
+                    return self.send_json({"error": "username must be at least 3 characters"}, 400)
+                if len(password) < 8:
+                    return self.send_json({"error": "password must be at least 8 characters"}, 400)
+                create_admin_user(conn, username, password)
+                new_token = create_session(conn, username)
+                audit(conn, username, "admin.signup", "account created", ip)
+                return self.send_json(
+                    {"ok": True, "username": username}, 200,
+                    {"Set-Cookie": self._cookie_header(new_token)},
+                )
+
+            # public: login
+            if path == "/admin/api/login" and method == "POST":
+                wait = _throttle_check(ip)
+                if wait > 0:
+                    return self.send_json({"error": f"too many attempts, retry in {wait}s"}, 429)
+                username = str((payload or {}).get("username") or "").strip()
+                password = str((payload or {}).get("password") or "")
+                user = verify_admin(conn, username, password)
+                if not user:
+                    _throttle_fail(ip)
+                    audit(conn, username or "anonymous", "admin.login_failed", "bad credentials", ip)
+                    return self.send_json({"error": "invalid username or password"}, 401)
+                _throttle_clear(ip)
+                new_token = create_session(conn, user)
+                audit(conn, user, "admin.login", "session started", ip)
+                return self.send_json(
+                    {"ok": True, "username": user}, 200,
+                    {"Set-Cookie": self._cookie_header(new_token)},
+                )
+
+            # public: logout
+            if path == "/admin/api/logout" and method == "POST":
+                if actor:
+                    audit(conn, actor, "admin.logout", "session ended", ip)
+                destroy_session(conn, token)
+                return self.send_json(
+                    {"ok": True}, 200, {"Set-Cookie": self._cookie_header("", max_age=0)}
+                )
+
+            # ---- everything below requires a valid session ----
+            if not actor:
+                return self.send_json({"error": "authentication required"}, 401)
+
+            bid = _to_int((qs.get("branch_id") or [""])[0]) or None
+
+            if path == "/admin/api/analytics" and method == "GET":
+                n = min(24, max(3, _to_int((qs.get("n") or ["6"])[0], 6)))
+                return self.send_json(analytics(conn, branch_id=bid, months=n))
+
+            if path == "/admin/api/overview" and method == "GET":
+                m = meta(conn)
+                a = analytics(conn, branch_id=bid, months=12)
+                counts = {
+                    "purchases": conn.execute("SELECT COUNT(*) c FROM purchases").fetchone()["c"],
+                    "branches": len(m["branches"]),
+                    "distributors": len(m["distributor_options"]),
+                    "products": len(m["product_options"]),
+                    "audit_entries": conn.execute("SELECT COUNT(*) c FROM audit_log").fetchone()["c"],
+                }
+                return self.send_json({
+                    "username": actor, "meta": m, "totals": a["totals"],
+                    "months": a["months"], "counts": counts,
+                    "top_items": a["top_items"][:8],
+                    "by_distributor": a["by_distributor"],
+                    "payment_split": a["payment_split"],
+                    "audit": audit_verify(conn),
+                })
+
+            if path == "/admin/api/audit" and method == "GET":
+                limit = min(1000, max(1, _to_int((qs.get("limit") or ["200"])[0], 200)))
+                offset = max(0, _to_int((qs.get("offset") or ["0"])[0], 0))
+                data = audit_list(conn, limit, offset)
+                data["verify"] = audit_verify(conn)
+                return self.send_json(data)
+
+            if path == "/admin/api/export" and method == "GET":
+                kind = (qs.get("type") or ["purchases"])[0]
+                fmt = (qs.get("format") or ["csv"])[0].lower()
+                if kind not in EXPORT_KINDS:
+                    return self.send_json({"error": f"unknown export type '{kind}'"}, 400)
+                if fmt not in ("csv", "json"):
+                    return self.send_json({"error": "format must be csv or json"}, 400)
+                records = export_records(conn, kind, branch_id=bid)
+                audit(conn, actor, "data.export",
+                      f"type={kind} format={fmt} rows={len(records)}", ip)
+                stamp = _utcnow().strftime("%Y%m%d-%H%M%S")
+                fname = f"pwbudget-{kind}-{stamp}.{fmt}"
+                if fmt == "json":
+                    body = json.dumps(records, ensure_ascii=False, indent=2)
+                    ctype = "application/json; charset=utf-8"
+                else:
+                    body = to_csv(records)
+                    ctype = "text/csv; charset=utf-8"
+                return self._send(body, 200, ctype, {
+                    "Content-Disposition": f'attachment; filename="{fname}"',
+                })
+
+            return self.send_json({"error": "not found"}, 404)
+        finally:
+            conn.close()
+
     # -- HTTP verbs -----------------------------------------------------------
     def do_GET(self):
         try:
             parsed = urlparse(self.path)
-            if parsed.path.startswith("/api/"):
+            if parsed.path.startswith("/admin/api/"):
+                self._admin_api("GET", parsed.path, parse_qs(parsed.query), None)
+            elif parsed.path.startswith("/api/"):
                 self._api("GET", parsed.path, parse_qs(parsed.query), None)
             else:
                 self._static(parsed.path)
@@ -931,18 +1360,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             parsed = urlparse(self.path)
-            if not parsed.path.startswith("/api/"):
+            if not (parsed.path.startswith("/api/") or parsed.path.startswith("/admin/api/")):
                 return self.send_json({"error": "not found"}, 404)
             payload = self._read_body()
             if payload is None:
                 return self.send_json({"error": "invalid JSON body"}, 400)
-            self._api("POST", parsed.path, parse_qs(parsed.query), payload)
+            if parsed.path.startswith("/admin/api/"):
+                self._admin_api("POST", parsed.path, parse_qs(parsed.query), payload)
+            else:
+                self._api("POST", parsed.path, parse_qs(parsed.query), payload)
         except Exception as exc:  # noqa: BLE001
             self.send_json({"error": str(exc)}, 500)
 
     def do_DELETE(self):
         try:
             parsed = urlparse(self.path)
+            if parsed.path.startswith("/admin/api/"):
+                return self._admin_api("DELETE", parsed.path, parse_qs(parsed.query), None)
             if not parsed.path.startswith("/api/"):
                 return self.send_json({"error": "not found"}, 404)
             self._api("DELETE", parsed.path, parse_qs(parsed.query), None)
@@ -973,6 +1407,15 @@ def init_db():
             # clean start: one default branch, nothing else — no test data
             conn.execute("INSERT INTO branches(name) VALUES (?)", ("Main Shop",))
         conn.commit()
+    # optionally pre-seed the single admin account from the environment
+    env_user = os.environ.get("PWBUDGET_ADMIN_USER")
+    env_pass = os.environ.get("PWBUDGET_ADMIN_PASS")
+    if env_user and env_pass and not admin_exists(conn):
+        create_admin_user(conn, env_user.strip()[:40], env_pass)
+        audit(conn, env_user.strip()[:40], "admin.signup", "account seeded from environment", "")
+    # drop expired sessions
+    conn.execute("DELETE FROM sessions WHERE expires_at < ?", (_utcnow().isoformat(),))
+    conn.commit()
     conn.close()
 
 
@@ -982,6 +1425,7 @@ def main():
     shown = "127.0.0.1" if HOST in ("0.0.0.0", "::") else HOST
     print(f"\n  PW Budget - Stock, Distributor, Credit & Analytics")
     print(f"  http://{shown}:{PORT}")
+    print(f"  Admin dashboard: http://{shown}:{PORT}/admin/")
     print(f"  Database: {DB_PATH}")
     print(f"  Press Ctrl+C to stop\n")
     try:

@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>PRAXIS — Intelligence</title>
+<meta name="description" content="Protected single-user business intelligence dashboard for PW Budget.">
+<meta name="robots" content="noindex, nofollow">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link rel="stylesheet" href="../theme.css">
+<style>
+  .shell { max-width:1180px; margin:0 auto; padding:28px 24px 80px; }
+  .hidden { display:none !important; }
+
+  /* ---- auth card ---- */
+  .auth-wrap { min-height:100vh; display:grid; place-items:center; padding:24px; }
+  .auth-card { width:100%; max-width:420px; padding:34px 30px; }
+  .auth-card h1 { font-family:var(--serif); font-size:26px; margin:6px 0 4px; }
+  .auth-card .kicker { margin-bottom:2px; }
+  .auth-card p.note { color:var(--sub); font-size:13.5px; margin:8px 0 20px; }
+  .field { margin-bottom:14px; }
+  .field label { display:block; font-size:12px; letter-spacing:1.4px; text-transform:uppercase;
+    color:var(--sub); font-weight:700; margin-bottom:6px; }
+  .field input {
+    width:100%; padding:12px 14px; border-radius:var(--btn-radius);
+    background:#0b0b10; border:1px solid var(--line2); color:var(--ink);
+    font-size:15px; font-family:var(--font);
+  }
+  .field input:focus { outline:2px solid var(--gold); outline-offset:1px; }
+  .err { color:var(--red); font-size:13.5px; min-height:18px; margin:6px 0 2px; }
+  .btn-full { width:100%; justify-content:center; }
+
+  /* ---- dashboard chrome ---- */
+  .topbar { display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+    padding-bottom:18px; border-bottom:1px solid var(--line); margin-bottom:26px; }
+  .topbar .title { font-family:var(--serif); font-size:22px; }
+  .topbar .title .gold-text { font-weight:700; }
+  .who { color:var(--sub); font-size:13.5px; }
+  .integrity { font-size:12px; font-weight:800; letter-spacing:1px; padding:5px 12px;
+    border-radius:20px; text-transform:uppercase; }
+  .integrity.ok { background:rgba(52,211,153,.14); border:1px solid rgba(52,211,153,.5); color:var(--green); }
+  .integrity.bad { background:rgba(248,113,113,.14); border:1px solid rgba(248,113,113,.5); color:var(--red); }
+
+  /* ---- KPI grid ---- */
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:16px; margin-bottom:26px; }
+  .kpi { padding:20px; }
+  .kpi .label { font-size:11.5px; letter-spacing:1.6px; text-transform:uppercase; color:var(--sub); font-weight:700; }
+  .kpi .value { font-family:var(--serif); font-size:30px; margin-top:8px; color:var(--ink); }
+  .kpi .value.gold { color:var(--gold-hi); }
+  .kpi .foot { font-size:12.5px; color:var(--sub); margin-top:4px; }
+
+  /* ---- panels / charts ---- */
+  .grid2 { display:grid; grid-template-columns:1.4fr 1fr; gap:18px; margin-bottom:18px; }
+  @media (max-width:900px){ .grid2 { grid-template-columns:1fr; } }
+  .card { padding:22px; }
+  .card h3 { font-size:13px; letter-spacing:1.6px; text-transform:uppercase; color:var(--gold);
+    font-weight:800; margin-bottom:16px; }
+  .bars { display:flex; align-items:flex-end; gap:10px; height:190px; }
+  .bar-col { flex:1; display:flex; flex-direction:column; align-items:center; gap:8px; height:100%; justify-content:flex-end; }
+  .bar { width:100%; border-radius:6px 6px 0 0; background:var(--gold-grad); min-height:3px;
+    box-shadow:0 6px 14px -8px rgba(212,175,55,.8); position:relative; }
+  .bar .tip { position:absolute; top:-20px; left:50%; transform:translateX(-50%);
+    font-size:10.5px; color:var(--sub); white-space:nowrap; }
+  .bar-lbl { font-size:11px; color:var(--sub); }
+
+  table { width:100%; border-collapse:collapse; font-size:13.5px; }
+  th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line-soft); }
+  th { font-size:11px; letter-spacing:1px; text-transform:uppercase; color:var(--sub); font-weight:700; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .rank { display:flex; align-items:center; gap:10px; margin-bottom:11px; }
+  .rank .nm { flex:1; font-size:13.5px; }
+  .rank .track { flex:2; height:9px; background:#0b0b10; border-radius:6px; overflow:hidden; border:1px solid var(--line-soft); }
+  .rank .fill { height:100%; background:var(--gold-grad); }
+  .rank .amt { width:110px; text-align:right; font-variant-numeric:tabular-nums; color:var(--sub); font-size:12.5px; }
+
+  .pill-row { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
+  .pill { font-size:12px; padding:5px 12px; border-radius:20px; background:#0b0b10;
+    border:1px solid var(--line); color:var(--sub); }
+
+  .exports { display:flex; flex-wrap:wrap; gap:10px; }
+  .export-group { border:1px solid var(--line); border-radius:var(--btn-radius); padding:14px 16px; flex:1; min-width:220px; }
+  .export-group h4 { font-size:12px; letter-spacing:1.4px; text-transform:uppercase; color:var(--ink); margin-bottom:10px; }
+  .export-group .btn { padding:8px 14px; font-size:13px; margin:0 6px 6px 0; }
+
+  .audit-wrap { max-height:420px; overflow:auto; }
+  .audit-wrap td, .audit-wrap th { white-space:nowrap; }
+  .audit-wrap td.detail { white-space:normal; color:var(--sub); }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; color:var(--sub); }
+  .sec-title { font-family:var(--serif); font-size:18px; margin:30px 0 14px; color:var(--ink); }
+  .spin { color:var(--sub); font-size:14px; padding:40px; text-align:center; }
+</style>
+</head>
+<body>
+
+<!-- ================= AUTH ================= -->
+<div id="auth" class="auth-wrap hidden">
+  <div class="auth-card panel">
+    <div class="kicker">PRAXIS · Restricted</div>
+    <h1 id="auth-title">Sign in</h1>
+    <p class="note" id="auth-note">This dashboard is limited to a single authorised user.</p>
+    <form id="auth-form" autocomplete="on">
+      <div class="field">
+        <label for="u">Username</label>
+        <input id="u" name="username" autocomplete="username" required minlength="3" maxlength="40">
+      </div>
+      <div class="field">
+        <label for="p">Password</label>
+        <input id="p" name="password" type="password" autocomplete="current-password" required minlength="8">
+      </div>
+      <div class="err" id="auth-err"></div>
+      <button class="btn btn-gold btn-full" id="auth-submit" type="submit">Sign in</button>
+    </form>
+  </div>
+</div>
+
+<!-- ================= DASHBOARD ================= -->
+<div id="dash" class="shell hidden">
+  <div class="topbar">
+    <div>
+      <div class="title">PRAXIS <span class="gold-text">Intelligence</span></div>
+      <div class="who">signed in as <strong id="who">—</strong></div>
+    </div>
+    <div class="spacer" style="flex:1"></div>
+    <span id="integrity" class="integrity ok">log intact</span>
+    <button class="btn btn-ghost" id="refresh">Refresh</button>
+    <button class="btn btn-ghost" id="logout">Sign out</button>
+  </div>
+
+  <div id="loading" class="spin">Crunching the ledger…</div>
+
+  <div id="content" class="hidden">
+    <div class="kpis" id="kpis"></div>
+
+    <div class="grid2">
+      <div class="card panel">
+        <h3>Monthly spend (12 mo)</h3>
+        <div class="bars" id="bars"></div>
+      </div>
+      <div class="card panel">
+        <h3>Payment mix</h3>
+        <div id="paymix"></div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card panel">
+        <h3>Top products by spend</h3>
+        <div id="topitems"></div>
+      </div>
+      <div class="card panel">
+        <h3>Distributors</h3>
+        <div id="dists"></div>
+      </div>
+    </div>
+
+    <div class="sec-title">Data export</div>
+    <div class="card panel">
+      <p class="note" style="color:var(--sub);font-size:13.5px;margin-bottom:16px">
+        Download accurate, readable records for research, accounting or legal purposes.
+        Every export is written to the tamper-evident audit log.
+      </p>
+      <div class="exports" id="exports"></div>
+    </div>
+
+    <div class="sec-title">Activity &amp; audit log</div>
+    <div class="card panel">
+      <div class="pill-row" id="audit-meta"></div>
+      <div class="audit-wrap">
+        <table>
+          <thead><tr>
+            <th>When (UTC)</th><th>Actor</th><th>Action</th><th>Detail</th><th>IP</th><th>Hash</th>
+          </tr></thead>
+          <tbody id="audit-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var CUR = "GH\u20b5";
+  var $ = function (id) { return document.getElementById(id); };
+
+  function money(n) {
+    n = Number(n || 0);
+    return CUR + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function api(path, opts) {
+    return fetch(path, Object.assign({ credentials: "same-origin",
+      headers: { "Content-Type": "application/json" } }, opts || {}))
+      .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); });
+  }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  // ---------- auth ----------
+  var signupMode = false;
+  function showAuth(mode) {
+    signupMode = (mode === "signup");
+    $("auth").classList.remove("hidden");
+    $("dash").classList.add("hidden");
+    $("auth-title").textContent = signupMode ? "Create your account" : "Sign in";
+    $("auth-note").textContent = signupMode
+      ? "First run: pick the one username and password that will guard this dashboard. This locks the account."
+      : "This dashboard is limited to a single authorised user.";
+    $("auth-submit").textContent = signupMode ? "Create account" : "Sign in";
+    $("p").autocomplete = signupMode ? "new-password" : "current-password";
+    $("auth-err").textContent = "";
+  }
+
+  $("auth-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var u = $("u").value.trim(), p = $("p").value;
+    $("auth-err").textContent = "";
+    $("auth-submit").disabled = true;
+    var url = signupMode ? "/admin/api/signup" : "/admin/api/login";
+    api(url, { method: "POST", body: JSON.stringify({ username: u, password: p }) })
+      .then(function (res) {
+        $("auth-submit").disabled = false;
+        if (res.status >= 200 && res.status < 300 && res.body.ok) { boot(); }
+        else { $("auth-err").textContent = res.body.error || "Failed (" + res.status + ")"; }
+      })
+      .catch(function () { $("auth-submit").disabled = false; $("auth-err").textContent = "Network error"; });
+  });
+
+  $("logout").addEventListener("click", function () {
+    api("/admin/api/logout", { method: "POST", body: "{}" }).then(function () { location.reload(); });
+  });
+  $("refresh").addEventListener("click", boot);
+
+  // ---------- render ----------
+  function kpi(label, value, foot, gold) {
+    return '<div class="kpi panel"><div class="label">' + esc(label) + '</div>' +
+      '<div class="value' + (gold ? ' gold' : '') + '">' + esc(value) + '</div>' +
+      '<div class="foot">' + esc(foot || "") + '</div></div>';
+  }
+
+  function renderBars(months) {
+    var max = Math.max.apply(null, months.map(function (m) { return m.spend; }).concat([1]));
+    $("bars").innerHTML = months.map(function (m) {
+      var h = Math.round((m.spend / max) * 100);
+      var lbl = m.month.slice(2).replace("-", "/");
+      return '<div class="bar-col"><div class="bar" style="height:' + h + '%">' +
+        (m.spend > 0 ? '<span class="tip">' + money(m.spend) + '</span>' : '') +
+        '</div><div class="bar-lbl">' + esc(lbl) + '</div></div>';
+    }).join("");
+  }
+
+  function renderRank(el, rows, nameKey, valKey, fmt) {
+    var max = Math.max.apply(null, rows.map(function (r) { return r[valKey]; }).concat([1]));
+    el.innerHTML = rows.length ? rows.map(function (r) {
+      var pct = Math.round((r[valKey] / max) * 100);
+      return '<div class="rank"><div class="nm">' + esc(r[nameKey]) + '</div>' +
+        '<div class="track"><div class="fill" style="width:' + pct + '%"></div></div>' +
+        '<div class="amt">' + fmt(r[valKey]) + '</div></div>';
+    }).join("") : '<div class="who">No data yet.</div>';
+  }
+
+  function renderPaymix(split) {
+    var total = split.reduce(function (s, r) { return s + r.spend; }, 0) || 1;
+    $("paymix").innerHTML = split.length ? split.map(function (r) {
+      var pct = Math.round((r.spend / total) * 100);
+      return '<div class="rank"><div class="nm">' + esc(r.method) + ' <span class="who">(' + r.buys + ')</span></div>' +
+        '<div class="track"><div class="fill" style="width:' + pct + '%"></div></div>' +
+        '<div class="amt">' + pct + '%</div></div>';
+    }).join("") : '<div class="who">No data yet.</div>';
+  }
+
+  var EXPORTS = [
+    { type: "purchases", label: "Purchases" },
+    { type: "credits", label: "Credit ledger" },
+    { type: "budgets", label: "Budgets" },
+    { type: "analytics", label: "Analytics (12 mo)" },
+    { type: "audit", label: "Audit log" }
+  ];
+  function renderExports() {
+    $("exports").innerHTML = EXPORTS.map(function (e) {
+      return '<div class="export-group"><h4>' + esc(e.label) + '</h4>' +
+        '<a class="btn btn-gold" href="/admin/api/export?type=' + e.type + '&format=csv">CSV</a>' +
+        '<a class="btn btn-ghost" href="/admin/api/export?type=' + e.type + '&format=json">JSON</a>' +
+        '</div>';
+    }).join("");
+  }
+
+  function renderAudit(data) {
+    var v = data.verify || {};
+    var badge = $("integrity");
+    if (v.ok) { badge.className = "integrity ok"; badge.textContent = "log intact · " + (v.verified || 0) + " entries"; }
+    else { badge.className = "integrity bad"; badge.textContent = "log tampered @ #" + v.broken_at; }
+    $("audit-meta").innerHTML =
+      '<span class="pill">total ' + (data.total || 0) + '</span>' +
+      '<span class="pill">showing ' + (data.rows ? data.rows.length : 0) + '</span>' +
+      '<span class="pill">hash chain ' + (v.ok ? "verified" : "BROKEN") + '</span>';
+    $("audit-body").innerHTML = (data.rows || []).map(function (r) {
+      return '<tr><td class="mono">' + esc(r.ts) + '</td><td>' + esc(r.actor) + '</td>' +
+        '<td><strong>' + esc(r.action) + '</strong></td><td class="detail">' + esc(r.detail) + '</td>' +
+        '<td class="mono">' + esc(r.ip) + '</td><td class="mono">' + esc(String(r.row_hash).slice(0, 12)) + '…</td></tr>';
+    }).join("");
+  }
+
+  function renderOverview(o) {
+    $("who").textContent = o.username;
+    var t = o.totals || {}, c = o.counts || {};
+    $("kpis").innerHTML =
+      kpi("Total spend (12 mo)", money(t.spend), (t.buys || 0) + " purchases", true) +
+      kpi("Credit outstanding", money(t.credit_outstanding), (t.open_credit_count || 0) + " open lines") +
+      kpi("Credit cleared", money(t.credit_cleared), "of " + money(t.total_credit)) +
+      kpi("Records", String(c.purchases || 0), (c.branches || 0) + " branches · " + (c.products || 0) + " products") +
+      kpi("Distributors", String(c.distributors || 0), "active suppliers") +
+      kpi("Audit entries", String(c.audit_entries || 0), o.audit && o.audit.ok ? "chain intact" : "chain BROKEN");
+
+    renderBars(o.months || []);
+    renderPaymix(o.payment_split || []);
+    renderRank($("topitems"), o.top_items || [], "product", "spend", money);
+    renderRank($("dists"), (o.by_distributor || []).slice(0, 8), "name", "spend", money);
+    renderExports();
+  }
+
+  // ---------- boot ----------
+  function boot() {
+    api("/admin/api/session").then(function (res) {
+      var s = res.body || {};
+      if (!s.authed) { showAuth(s.signup_required ? "signup" : "login"); return; }
+      $("auth").classList.add("hidden");
+      $("dash").classList.remove("hidden");
+      $("loading").classList.remove("hidden");
+      $("content").classList.add("hidden");
+      Promise.all([
+        api("/admin/api/overview"),
+        api("/admin/api/audit?limit=200")
+      ]).then(function (r) {
+        $("loading").classList.add("hidden");
+        $("content").classList.remove("hidden");
+        renderOverview(r[0].body || {});
+        renderAudit(r[1].body || { rows: [], verify: {} });
+      }).catch(function () {
+        $("loading").textContent = "Failed to load dashboard data.";
+      });
+    });
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>
