@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 64" role="img" aria-label="PRAXIS">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f7e7a8"/>
+      <stop offset=".5" stop-color="#d4af37"/>
+      <stop offset="1" stop-color="#a8842a"/>
+    </linearGradient>
+    <linearGradient id="dark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a2210"/>
+      <stop offset="1" stop-color="#12100a"/>
+    </linearGradient>
+    <linearGradient id="lite" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f7e7a8"/>
+      <stop offset="1" stop-color="#c9a233"/>
+    </linearGradient>
+  </defs>
+
+  <!-- ===== PLACEHOLDER LOGO =====
+       Replace this file with your real logo (keep the name logo.svg,
+       or update the <img src> in index.html / pw-budget/index.html).
+       Works at any size: nav (42px tall), footer (36px), favicon. -->
+
+  <!-- mark: faceted pyramid -->
+  <g transform="translate(4,6)">
+    <polygon points="26,0 50,44 2,44" fill="url(#lite)"/>
+    <polygon points="26,0 50,44 26,44" fill="url(#dark)" opacity=".55"/>
+    <rect x="0" y="47" width="52" height="5" rx="2" fill="url(#g)"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="70" y="44" font-family="Georgia,'Times New Roman',serif" font-size="34"
+        font-weight="700" letter-spacing="7" fill="url(#g)">PRAXIS</text>
+</svg>

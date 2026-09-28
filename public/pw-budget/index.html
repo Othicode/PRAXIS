@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>PW Budget — Stock, Credit & Budget for Print Shops</title>
+<meta name="description" content="PW Budget: track purchases, distributors, credit and budgets for your print shop. Installs on your phone and works completely offline.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link rel="icon" href="../favicon.ico">
+<link rel="apple-touch-icon" href="../app/icons/apple-touch-icon.png">
+<meta name="theme-color" content="#07070a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="PW Budget">
+<meta property="og:type" content="website">
+<meta property="og:title" content="PW Budget — Stock, Credit & Budget for Print Shops">
+<meta property="og:description" content="Track every purchase, distributor, credit and budget offline. Install on your phone — works with no internet.">
+<meta property="og:image" content="../app/icons/icon-512.png">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="PW Budget — Stock, Credit & Budget for Print Shops">
+<meta name="twitter:description" content="Offline stock, credit & budget manager for print shops.">
+<link rel="canonical" href="./">
+<link rel="stylesheet" href="../theme.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"PW Budget","applicationCategory":"BusinessApplication","operatingSystem":"Android, iOS, Web","offers":{"@type":"Offer","price":"100","priceCurrency":"GHS"},"description":"Offline stock, distributor, credit and budget tracker for print shops."}</script>
+<style>
+/* ---- hero ---- */
+.hero { position:relative; padding:90px 0 72px; text-align:center; overflow:hidden; }
+.deco { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+.deco .cube { opacity:.65; }
+.hero .pill {
+  display:inline-block; padding:8px 18px; border-radius:20px;
+  background:rgba(212,175,55,.08); border:1px solid var(--line);
+  font-size:13px; font-weight:700; color:var(--gold-hi); margin-bottom:24px;
+  letter-spacing:.5px;
+}
+.hero h1 {
+  font-family:var(--serif); font-size:clamp(34px,5.5vw,62px); font-weight:700;
+  letter-spacing:-1.2px; line-height:1.08; max-width:880px; margin:0 auto;
+}
+.hero h1 em { font-style:normal; }
+.hero p { max-width:640px; margin:22px auto 0; font-size:18px; color:var(--sub); }
+.hero .cta { margin-top:32px; display:flex; gap:14px; justify-content:center; flex-wrap:wrap; }
+.hero .fineprint { margin-top:16px; font-size:13px; color:var(--sub); }
+
+/* ---- product showcase ---- */
+.product { padding:36px 0 84px; }
+.product-card {
+  display:block; border-radius:18px; overflow:hidden; position:relative;
+  background:linear-gradient(135deg,#161207 0%,#241c08 55%,#3a2e0e 100%);
+  border:1px solid rgba(212,175,55,.45);
+  box-shadow:0 14px 30px -14px rgba(212,175,55,.45);
+  transition:transform .25s, box-shadow .25s;
+}
+.product-card:hover { transform:translateY(-5px);
+  box-shadow:0 26px 52px -20px rgba(212,175,55,.5); }
+.product-card .inner { padding:52px 56px; display:grid; grid-template-columns:1.1fr .9fr; gap:40px; align-items:center; }
+.product-card .eyebrow { font-size:12.5px; font-weight:800; letter-spacing:2px; text-transform:uppercase; color:var(--gold); }
+.product-card h2 { font-family:var(--serif); font-size:clamp(26px,3.5vw,40px); font-weight:700; letter-spacing:-.5px; margin:10px 0 14px; color:var(--ink); }
+.product-card p { color:#d8cba6; font-size:15.5px; }
+.product-card .go {
+  display:inline-flex; align-items:center; gap:8px; margin-top:22px;
+  background:var(--gold-grad); color:#191301; font-weight:750; font-size:15px;
+  padding:13px 26px; border-radius:var(--btn-radius);
+  box-shadow:0 8px 18px -10px rgba(212,175,55,.85);
+}
+.product-card .shot {
+  background:#0d0d12; border:1px solid var(--line); border-radius:var(--radius); padding:18px;
+  color:var(--ink); box-shadow:0 24px 50px -20px rgba(0,0,0,.8); transform:rotate(1.5deg);
+}
+.shot .kpis { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.shot .k { background:rgba(212,175,55,.06); border:1px solid var(--line-soft); border-radius:var(--btn-radius); padding:10px 12px; }
+.shot .k small { display:block; font-size:10.5px; color:var(--sub); text-transform:uppercase; letter-spacing:.5px; }
+.shot .k b { font-size:16px; color:var(--gold-hi); }
+.shot .k b.red { color:var(--red); }
+.shot .bars { display:flex; align-items:flex-end; gap:7px; height:74px; margin-top:14px; }
+.shot .bars i { flex:1; border-radius:5px 5px 0 0; background:linear-gradient(180deg,#f7e7a8,#a8842a); }
+.shot .rows { margin-top:12px; border-top:1px solid var(--line-soft); }
+.shot .rows div { display:flex; justify-content:space-between; font-size:12px; padding:7px 2px;
+  border-bottom:1px solid var(--line-soft); color:var(--sub); }
+.shot .rows div b { color:var(--ink); font-weight:650; }
+
+/* ---- sections ---- */
+section { padding:80px 0; }
+section.soft { background:var(--bg2); border-top:1px solid var(--line-soft); border-bottom:1px solid var(--line-soft); }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:18px; margin-top:40px; }
+.feature { padding:26px; transition:transform .3s, border-color .18s; }
+.feature:hover { border-color:rgba(212,175,55,.45); }
+.feature .ico { width:44px; height:44px; border-radius:12px; display:grid; place-items:center;
+  font-size:21px; background:rgba(212,175,55,.10); border:1px solid var(--line); margin-bottom:14px; }
+.feature h3 { font-size:16px; margin-bottom:6px; color:var(--ink); }
+.feature p { color:var(--sub); font-size:14.5px; }
+
+.steps3 { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:22px; margin-top:44px; }
+.step .n { width:42px; height:42px; border-radius:50%; background:var(--gold-grad); color:#191301;
+  display:grid; place-items:center; font-weight:800; font-size:16px; margin-bottom:14px;
+  box-shadow:0 10px 22px -10px rgba(212,175,55,.6); }
+.step h3 { font-size:17px; margin-bottom:6px; color:var(--ink); }
+.step p { color:var(--sub); font-size:15px; }
+
+.steps { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:22px; margin-top:40px; }
+.step-card { padding:28px; }
+.step-card h3 { font-size:17px; margin-bottom:16px; display:flex; align-items:center; gap:9px; color:var(--ink); }
+.step-card ol { list-style:none; counter-reset:s; }
+.step-card ol li { counter-increment:s; position:relative; padding:0 0 14px 46px; font-size:14.5px; color:var(--sub); }
+.step-card ol li::before {
+  content:counter(s); position:absolute; left:0; top:0; width:30px; height:30px;
+  background:var(--gold-grad); color:#191301; border-radius:50%; display:grid; place-items:center;
+  font-weight:800; font-size:13px;
+}
+.kbd { display:inline-block; padding:2px 9px; border-radius:6px; background:rgba(212,175,55,.12);
+  border:1px solid var(--line); font-size:12.5px; font-weight:700; color:var(--gold-hi); }
+
+/* ---- pricing ---- */
+.price-card {
+  max-width:560px; margin:44px auto 0; padding:44px; text-align:center;
+  background:linear-gradient(165deg,var(--panel),#0e0e14);
+  border:1px solid rgba(212,175,55,.4); border-radius:var(--radius);
+  box-shadow:var(--shadow);
+}
+.price-card .amount {
+  font-family:var(--serif); font-size:58px; font-weight:700; letter-spacing:-2.5px;
+  background:var(--gold-grad); -webkit-background-clip:text; background-clip:text; color:transparent;
+}
+.price-card .amount small { font-size:20px; font-weight:700; letter-spacing:0; }
+.price-card .tag { display:inline-block; margin-top:6px; font-size:14px; color:var(--green); font-weight:700; }
+.price-card ul { list-style:none; text-align:left; max-width:340px; margin:26px auto; }
+.price-card li { padding:9px 0; font-size:15px; border-bottom:1px dashed var(--line-soft);
+  display:flex; gap:10px; color:var(--sub); }
+.price-card li:last-child { border-bottom:none; }
+.price-card .check { color:var(--gold); font-weight:800; }
+.note {
+  margin-top:26px; background:rgba(212,175,55,.07); border:1px solid var(--line);
+  border-radius:14px; padding:14px 18px; font-size:13.5px; color:#d8cba6; text-align:left;
+}
+
+/* ---- faq ---- */
+.faq { max-width:760px; margin:40px auto 0; }
+details { padding:18px 22px; margin-bottom:12px; background:linear-gradient(165deg,var(--panel),#0e0e14);
+  border:1px solid var(--line-soft); border-radius:14px; }
+summary { cursor:pointer; font-weight:700; font-size:15.5px; list-style:none; color:var(--ink);
+  display:flex; justify-content:space-between; align-items:center; gap:12px; }
+summary::after { content:"+"; font-size:22px; color:var(--gold); font-weight:400; }
+details[open] summary::after { content:"–"; }
+details p { margin-top:12px; color:var(--sub); font-size:14.5px; }
+
+/* ---- final cta ---- */
+.final { text-align:center; padding:92px 0; position:relative; overflow:hidden;
+  background:radial-gradient(ellipse 700px 340px at 50% 120%, rgba(212,175,55,.16), transparent 70%),
+             linear-gradient(180deg,var(--bg2),var(--bg));
+  border-top:1px solid var(--line); }
+.final h2 { font-family:var(--serif); font-size:clamp(28px,4.5vw,46px); font-weight:700; letter-spacing:-1px; }
+.final p { color:var(--sub); margin-top:12px; font-size:17px; }
+.final .cta { margin-top:30px; display:flex; gap:14px; justify-content:center; flex-wrap:wrap; }
+
+@media (max-width:860px) {
+  .product-card .inner { grid-template-columns:1fr; padding:36px 26px; }
+  .product-card .shot { transform:none; }
+}
+</style>
+</head>
+<body>
+
+<!-- ============ nav (same as PRAXIS) ============ -->
+<div class="top">
+  <div class="wrap">
+    <!-- LOGO: replace ../logo.svg with your own logo file -->
+    <a class="logo-link" href="../" aria-label="PRAXIS home">
+      <img class="logo-img" src="../logo.svg" alt="PRAXIS">
+    </a>
+    <span class="logo-sep"></span>
+    <span class="brand-sub">PW Budget</span>
+    <nav class="nav">
+      <a href="#product">Product</a>
+      <a href="#features">Features</a>
+      <a href="#install">Install</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <span class="spacer"></span>
+    <a class="btn btn-gold" href="../app/">Open the app →</a>
+  </div>
+</div>
+
+<!-- ============ hero ============ -->
+<header class="hero">
+  <div class="deco" aria-hidden="true">
+    <div class="cube c1" style="--s:64px; left:7%;  top:24%"></div>
+    <div class="cube c2" style="--s:42px; right:9%; top:34%"></div>
+    <div class="cube c3" style="--s:54px; right:5%; bottom:12%"></div>
+  </div>
+  <div class="wrap">
+    <span class="pill">A PRAXIS product · Offline-first · Works with no internet</span>
+    <h1>Stock, credit &amp; budget — <em class="gold-text">built for print shops</em>.</h1>
+    <p>PW Budget keeps every purchase, distributor, unpaid credit and monthly budget in one simple app.
+       Install it on your phone once, then use it anywhere — even in airplane mode.</p>
+    <div class="cta">
+      <a class="btn btn-gold btn-big" href="../app/">Open the app →</a>
+      <a class="btn btn-ghost btn-big" href="#install">How to install</a>
+    </div>
+    <p class="fineprint">Free while in early access · GH₵100 one-time when payments open · Your data stays on your phone</p>
+  </div>
+</header>
+
+<!-- ============ product showcase ============ -->
+<div class="product wrap" id="product">
+  <a class="product-card" href="../app/">
+    <div class="inner">
+      <div>
+        <div class="eyebrow">◈ The product</div>
+        <h2>PW Budget</h2>
+        <p>The full app — dashboard, purchases, credits, analytics, budget planner,
+           branches and a built-in calculator. Record a purchase in seconds:
+           type the distributor and item, quantity and amount — unit price,
+           credit balance and %-cleared are calculated for you.</p>
+        <span class="go">Launch PW Budget →</span>
+      </div>
+      <div class="shot" aria-hidden="true">
+        <div class="kpis">
+          <div class="k"><small>Spend this month</small><b>GH₵42,300</b></div>
+          <div class="k"><small>Outstanding credit</small><b class="red">GH₵16,600</b></div>
+        </div>
+        <div class="bars">
+          <i style="height:40%"></i><i style="height:65%"></i><i style="height:48%"></i>
+          <i style="height:82%"></i><i style="height:58%"></i><i style="height:95%"></i>
+        </div>
+        <div class="rows">
+          <div><span>DTF Powder · 200 bag</span><b>GH₵21,600</b></div>
+          <div><span>PET Film · 12 roll</span><b>GH₵14,400</b></div>
+          <div><span>CMYK Ink Set · 4 set</span><b>GH₵9,800</b></div>
+        </div>
+      </div>
+    </div>
+  </a>
+</div>
+
+<!-- ============ features ============ -->
+<section class="soft" id="features">
+  <div class="wrap">
+    <span class="kicker">Features</span>
+    <h2 class="h2">Everything the shop buys — in one place</h2>
+    <p class="sub">Made for DTF &amp; garment printing: powder, film, inks, blanks and more.</p>
+    <div class="grid">
+      <div class="feature panel"><div class="ico">🧾</div><h3>One-tap purchases</h3><p>Distributors and items are remembered automatically. Unit price is calculated for you.</p></div>
+      <div class="feature panel"><div class="ico">💳</div><h3>Credit tracker</h3><p>Enter the price and what you paid — balance and %-cleared update as you settle up.</p></div>
+      <div class="feature panel"><div class="ico">🔔</div><h3>Smart reminders</h3><p>The dashboard warns you when credit goes stale — “67 days old, pay it” — when the budget burns out, or when an item's price jumps.</p></div>
+      <div class="feature panel"><div class="ico">📈</div><h3>Analytics</h3><p>Spend per item, per distributor, monthly trends, unit-price trends and payment mix.</p></div>
+      <div class="feature panel"><div class="ico">🎯</div><h3>Budget planner</h3><p>Set a monthly budget and savings target — auto-distributed from your purchase history.</p></div>
+      <div class="feature panel"><div class="ico">🏬</div><h3>Multi-branch</h3><p>Add every shop and plant. Scope the dashboard to a branch, move purchases between them.</p></div>
+      <div class="feature panel"><div class="ico">🧮</div><h3>Built-in calculator</h3><p>A floating calculator on every screen — keyboard, √, %, x² and operator precedence.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ offline ============ -->
+<section id="offline">
+  <div class="wrap">
+    <span class="kicker">How it works</span>
+    <h2 class="h2">Install once. Works forever — offline.</h2>
+    <p class="sub">PW Budget is a progressive web app: it installs like a normal app, but needs no app store.</p>
+    <div class="steps3">
+      <div class="step"><div class="n">1</div><h3>Open it on Wi-Fi</h3><p>Visit the app link once. Your phone saves the whole app so it opens instantly from your home screen.</p></div>
+      <div class="step"><div class="n">2</div><h3>Use it anywhere</h3><p>Record purchases, settle credits and check budgets in airplane mode. Everything is stored on your device.</p></div>
+      <div class="step"><div class="n">3</div><h3>Get updates</h3><p>When a new version ships, the app shows a one-tap update banner next time you're online. Data is never lost.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ install ============ -->
+<section class="soft" id="install">
+  <div class="wrap">
+    <span class="kicker">Install</span>
+    <h2 class="h2">Add it to your home screen</h2>
+    <p class="sub">Two minutes, no app store, no APK. Share the app link, open it in the browser below, done.</p>
+    <div class="steps">
+      <div class="step-card panel">
+        <h3>🍎 iPhone / iPad</h3>
+        <ol>
+          <li>Open the app link in <strong style="color:var(--ink)">Safari</strong> (not other browsers).</li>
+          <li>Tap the <span class="kbd">Share</span> button <span style="font-size:16px">⎋</span> at the bottom of Safari.</li>
+          <li>Tap <span class="kbd">Add to Home Screen</span>.</li>
+          <li>Tap <span class="kbd">Add</span> — then open <strong style="color:var(--ink)">PW Budget</strong> from your home screen.</li>
+          <li>It now runs as its own app, fully offline. 🎉</li>
+        </ol>
+      </div>
+      <div class="step-card panel">
+        <h3>🤖 Android</h3>
+        <ol>
+          <li>Open the app link in <strong style="color:var(--ink)">Chrome</strong>.</li>
+          <li>Tap the <span class="kbd">⋮</span> menu (top right).</li>
+          <li>Tap <span class="kbd">Install app</span> or <span class="kbd">Add to Home screen</span>.</li>
+          <li>Install — an <strong style="color:var(--ink)">app icon</strong> appears with its own window.</li>
+          <li>From then on it runs offline, even in airplane mode. ✈️</li>
+        </ol>
+      </div>
+    </div>
+    <div class="note">💡 <strong>First-time tip:</strong> open the app once on Wi-Fi so it saves itself to your phone.
+      After that — purchases, credits, budgets, analytics and the calculator all work with <strong>no internet at all</strong>.
+      Your data stays on your phone.</div>
+  </div>
+</section>
+
+<!-- ============ pricing ============ -->
+<section id="pricing">
+  <div class="wrap center">
+    <span class="kicker">Pricing</span>
+    <h2 class="h2">Pay once. Own it.</h2>
+    <p class="sub">No subscription. No hidden fees. One payment, lifetime use.</p>
+    <div class="price-card" style="text-align:center">
+      <div class="amount">GH₵100 <small>once</small></div>
+      <div class="tag">✓ Early access is free — payments open soon</div>
+      <ul style="text-align:left">
+        <li><span class="check">✓</span> Full app — all features, no limits</li>
+        <li><span class="check">✓</span> Works 100% offline after install</li>
+        <li><span class="check">✓</span> All future updates included</li>
+        <li><span class="check">✓</span> Your data stays on your device</li>
+      </ul>
+      <a class="btn btn-gold btn-big" href="../app/">Start using it free →</a>
+      <div class="note" style="text-align:left">⏳ <strong>Payments coming soon.</strong> The app is free during early access.
+        When payments open you'll be able to activate with a one-time GH₵100 payment — and keep every update, forever.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ faq ============ -->
+<section class="soft" id="faq">
+  <div class="wrap">
+    <span class="kicker">FAQ</span>
+    <h2 class="h2">Questions, answered</h2>
+    <div class="faq">
+      <details open><summary>Does it really work without internet?</summary>
+        <p>Yes. After the one-time install over Wi-Fi, the entire app runs on your phone. Purchases, credits, budgets and analytics all work in airplane mode. Internet is only needed the first time, and briefly for updates.</p></details>
+      <details><summary>Where is my data stored?</summary>
+        <p>On your device, in the browser's local storage. It is never uploaded anywhere. That also means your data doesn't sync between devices — each phone keeps its own copy.</p></details>
+      <details><summary>How much does it cost?</summary>
+        <p>The app is free during early access. The planned price is a one-time GH₵100 — no subscription — which will include all future updates.</p></details>
+      <details><summary>Do I need an app store?</summary>
+        <p>No. iPhone installs via Safari's "Add to Home Screen", Android via Chrome's "Install app". No APK, no Play Store, no review waiting.</p></details>
+      <details><summary>How do updates work?</summary>
+        <p>When a new version is released and your phone is online, the app shows a "New version available — tap to update" banner. One tap reloads the new version. Your data is untouched.</p></details>
+      <details><summary>Can I use it for multiple shops?</summary>
+        <p>Yes — add every shop or plant as a branch, and scope the dashboard, purchases, credits and analytics to each one.</p></details>
+    </div>
+  </div>
+</section>
+
+<!-- ============ final cta ============ -->
+<div class="final">
+  <div class="wrap">
+    <h2>Your shop's numbers, in your pocket.</h2>
+    <p>Open the app, add it to your home screen, and start recording in under a minute.</p>
+    <div class="cta">
+      <a class="btn btn-gold btn-big" href="../app/">Open the app →</a>
+      <a class="btn btn-outline btn-big" href="#install">Install guide</a>
+    </div>
+  </div>
+</div>
+
+<!-- ============ footer (same as PRAXIS) ============ -->
+<footer class="foot">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <img class="foot-logo" src="../logo.svg" alt="PRAXIS">
+        <p>Offline stock, distributor, credit &amp; budget tracker for print shops — a product by PRAXIS.</p>
+      </div>
+      <div>
+        <h4>Product</h4>
+        <a href="#product">Overview</a>
+        <a href="#features">Features</a>
+        <a href="#pricing">Pricing</a>
+        <a href="../app/">Open the app →</a>
+      </div>
+      <div>
+        <h4>Get started</h4>
+        <a href="#install">Install on iPhone</a>
+        <a href="#install">Install on Android</a>
+        <a href="#faq">FAQ</a>
+        <a href="../">About PRAXIS</a>
+      </div>
+    </div>
+    <div class="foot-bottom">
+      <span>© 2026 PW Budget · A product by PRAXIS · Made for print shops</span>
+      <span class="motto-line">We think. We create. We do.</span>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

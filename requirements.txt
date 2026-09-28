@@ -1,0 +1,3 @@
+# PW Budget runs on the Python standard library only — nothing to install.
+# (This file exists so Render/Vercel/CI's default `pip install -r
+#  requirements.txt` build step succeeds.)

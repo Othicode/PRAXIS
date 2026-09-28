@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>PW Budget - Stock &amp; Spend</title>
+<!-- PWA -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#07070a">
+<meta name="description" content="Offline stock, distributor, credit &amp; budget tracker with a built-in calculator. Works with no internet after install.">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PW Budget">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+<script>
+/* Apply the saved appearance BEFORE first paint so the screen never flashes
+   the wrong theme. Mirrors applyTheme() in app.js (pwbudget.theme.v1). */
+try {
+  var _t = localStorage.getItem("pwbudget.theme.v1");
+  _t = (_t === "light" || _t === "dark") ? _t : "dark";
+  document.documentElement.setAttribute("data-theme", _t);
+  document.querySelector('meta[name="theme-color"]')
+          .setAttribute("content", _t === "light" ? "#f5f2ea" : "#07070a");
+} catch (e) { /* private mode: keep the default onyx theme */ }
+</script>
+</head>
+<body>
+
+<!-- ============ Top bar ============ -->
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark" id="brand-mark">PW</div>
+    <div class="brand-text">
+      <strong id="brand-name">PW Budget</strong>
+      <span id="brand-sub">Stock · Distributors · Credit</span>
+    </div>
+  </div>
+
+  <nav class="nav" id="main-nav">
+    <button class="nav-btn active" data-view="dashboard">📊 Dashboard</button>
+    <button class="nav-btn" data-view="purchases">🧾 Purchases</button>
+    <button class="nav-btn" data-view="credits">💳 Credits</button>
+    <button class="nav-btn" data-view="analytics">📈 Analytics</button>
+    <button class="nav-btn" data-view="budget">🎯 Budget</button>
+    <button class="nav-btn" data-view="branches">🏬 Branches</button>
+    <button class="nav-btn" id="btn-calc-nav" title="Calculator">🧮 Calculator</button>
+  </nav>
+
+  <div class="top-actions">
+    <span class="offline-badge hidden" id="offline-badge" title="No server is used — your data is saved on this device">Offline · data on device</span>
+    <label class="branch-pick">Branch
+      <select id="branch-select"></select>
+    </label>
+    <button class="profile-chip" id="profile-chip" title="Your shop identity">
+      <span class="avatar" id="profile-avatar">•</span>
+      <span class="profile-meta"><strong id="profile-name">Set up</strong><small id="profile-business">Your shop</small></span>
+    </button>
+    <button class="btn secondary hidden" id="btn-install" title="Install PW Budget on this device">⤓ Install app</button>
+    <button class="theme-btn" id="btn-theme" type="button" aria-pressed="false" aria-label="Switch between bright and dark appearance" title="Switch to bright appearance"><span id="theme-ico">☀️</span></button>
+    <button class="btn primary big" id="btn-new">＋ New Purchase</button>
+  </div>
+</header>
+
+<main class="main">
+  <!-- ============ DASHBOARD ============ -->
+  <section id="view-dashboard" class="view">
+    <div class="welcome" id="welcome-banner">
+      <div class="welcome-text">
+        <div class="welcome-hello" id="welcome-hello">Welcome back</div>
+        <div class="welcome-sub" id="welcome-sub">Here's what's happening today.</div>
+      </div>
+      <div class="welcome-date" id="welcome-date"></div>
+    </div>
+    <div class="install-hint hidden" id="install-hint">
+      <span>📲 Install <strong>PW Budget</strong> for offline use — open Chrome menu → <strong>Install app</strong>, or tap the button:</span>
+      <button class="btn secondary small" id="btn-install-2">⤓ Install</button>
+    </div>
+    <div class="alert-stack hidden" id="alert-stack" role="status" aria-live="polite"></div>
+    <div class="kpis" id="kpis"></div>
+    <div class="grid-3">
+      <div class="card span-2">
+        <div class="card-head"><h3>Monthly spend</h3><span class="legend" id="legend-flow"></span></div>
+        <div class="chart" id="chart-flow"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Where your money goes</h3></div>
+        <div class="chart" id="chart-donut"></div>
+        <div class="donut-legend" id="donut-legend"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Most bought items</h3></div>
+        <div class="h-list" id="top-items-list"></div>
+      </div>
+      <div class="card span-2">
+        <div class="card-head"><h3>Recent purchases</h3><button class="btn ghost small" data-goto="purchases">View all →</button></div>
+        <div class="recent" id="recent-list"></div>
+      </div>
+      <div class="card credit-watch">
+        <div class="card-head"><h3>Credit watch</h3><button class="btn ghost small" data-goto="credits">Manage →</button></div>
+        <div id="credit-watch"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PURCHASES ============ -->
+  <section id="view-purchases" class="view hidden">
+    <div class="card">
+      <div class="filters">
+        <input type="text" id="filter-q" placeholder="Search item, memo…">
+        <select id="filter-month"><option value="">All months</option></select>
+        <select id="filter-dist"><option value="">All distributors</option></select>
+        <select id="filter-product"><option value="">All items</option></select>
+        <select id="filter-pay"><option value="">Cash + Credit</option><option value="Cash">Cash</option><option value="Bank Transfer">Bank Transfer</option><option value="Mobile Money">Mobile Money</option><option value="Credit">On Credit</option></select>
+        <label class="check"><input type="checkbox" id="filter-owed"> Unpaid credit</label>
+        <button class="btn ghost" id="btn-reset">Reset</button>
+        <span class="grow"></span>
+        <span class="count" id="purchase-count"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="ledger">
+          <thead>
+            <tr><th>Date</th><th>Distributor</th><th>Item</th><th class="num">Qty</th>
+                <th class="num">Unit price</th><th class="num">Total</th><th>Paid via</th>
+                <th>Credit</th><th>Branch</th><th></th></tr>
+          </thead>
+          <tbody id="purchase-body"></tbody>
+        </table>
+      </div>
+      <div class="pager">
+        <button class="btn ghost small" id="page-prev">← Prev</button>
+        <span id="page-info"></span>
+        <button class="btn ghost small" id="page-next">Next →</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CREDITS ============ -->
+  <section id="view-credits" class="view hidden">
+    <div class="kpis" id="credit-kpis"></div>
+    <div class="card">
+      <div class="card-head"><h3>Outstanding credit</h3><span class="legend" id="credit-range"></span></div>
+      <div id="credit-list"></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Settled payments</h3></div>
+      <div id="credit-settled"></div>
+    </div>
+  </section>
+
+  <!-- ============ ANALYTICS ============ -->
+  <section id="view-analytics" class="view hidden">
+    <div class="kpis" id="ana-kpis"></div>
+    <div class="grid-3">
+      <div class="card span-2">
+        <div class="card-head"><h3>Spend per item</h3><span class="legend" id="legend-item"></span></div>
+        <div class="chart" id="chart-items"></div>
+        <div class="h-list" id="item-table"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Most bought by quantity</h3></div>
+        <div class="qty-list" id="qty-list"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Spend by distributor</h3></div>
+        <div class="h-list" id="dist-list"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Payment mix</h3></div>
+        <div class="h-list" id="pay-list"></div>
+      </div>
+      <div class="card span-2">
+        <div class="card-head"><h3>Unit price trend <span class="sub">top items</span></h3><span class="legend" id="legend-trend"></span></div>
+        <div class="chart" id="chart-trend"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ BUDGET ============ -->
+  <section id="view-budget" class="view hidden">
+    <div class="kpis" id="budget-kpis"></div>
+    <div class="card">
+      <div class="card-head"><h3>Budget planner</h3></div>
+      <div class="budget-form">
+        <label>Year <select id="b-year"></select></label>
+        <label>Month <select id="b-month"></select></label>
+        <label>Total budget <input type="number" id="b-total" min="0" step="100" placeholder="0"></label>
+        <label>I want to save <input type="number" id="b-save" min="0" step="100" placeholder="0"></label>
+        <button class="btn secondary" id="b-auto">⚡ Auto-distribute by my history</button>
+      </div>
+      <div class="spendable" id="b-spendable"></div>
+      <div class="alloc-head">
+        <span>Item allocation</span><span>%</span><span>Budget</span><span>Actual</span><span></span>
+      </div>
+      <div id="b-alloc"></div>
+      <div class="pager">
+        <span class="count" id="b-sum"></span>
+        <button class="btn primary" id="b-save-btn">Save budget</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ BRANCHES ============ -->
+  <section id="view-branches" class="view hidden">
+    <div class="card">
+      <div class="card-head"><h3>Branches / shops</h3></div>
+      <div class="branch-add">
+        <input type="text" id="new-branch-name" placeholder="e.g. Tema Branch" maxlength="60">
+        <button class="btn primary" id="btn-add-branch">＋ Add branch</button>
+      </div>
+      <div id="branch-list"></div>
+    </div>
+  </section>
+</main>
+
+<!-- ============ New purchase dialog ============ -->
+<dialog id="entry-dialog">
+  <form id="entry-form">
+    <div class="dialog-head">
+      <h3 id="dialog-title">🧾 New purchase</h3>
+      <button type="button" class="btn ghost small" data-close>✕</button>
+    </div>
+    <div class="form-grid">
+      <label>Date <input type="date" id="f-date" required></label>
+      <label>Branch <select id="f-branch"></select></label>
+      <label class="full">1 · Distributor <span class="hint">new name is saved automatically</span>
+        <input type="text" id="f-dist" list="dist-list" placeholder="e.g. Ceda Industrial Supplies" required>
+        <datalist id="dist-list"></datalist>
+      </label>
+      <label>2 · Item <span class="hint">new item saved automatically</span>
+        <input type="text" id="f-product" list="prod-list" placeholder="e.g. DTF Powder" required>
+        <datalist id="prod-list"></datalist>
+      </label>
+      <label>Unit
+        <input type="text" id="f-unit" list="unit-list" placeholder="bag" value="bag">
+        <datalist id="unit-list"></datalist>
+      </label>
+      <label>Quantity
+        <input type="number" id="f-qty" min="0.01" step="any" value="1" required>
+      </label>
+      <label>Paid via
+        <select id="f-method"></select>
+      </label>
+      <label id="lbl-total">3 · Total amount paid
+        <input type="number" id="f-total" min="0.01" step="0.01" placeholder="0.00" required>
+      </label>
+      <label id="lbl-credit-paid" class="hidden">Amount paid now
+        <input type="number" id="f-credit-paid" min="0" step="0.01" placeholder="0.00">
+      </label>
+      <label class="full">Memo
+        <input type="text" id="f-memo" maxlength="140" placeholder="optional note…">
+      </label>
+    </div>
+    <div class="live" id="live-box"></div>
+    <div class="form-err" id="form-err"></div>
+    <div class="dialog-foot">
+      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="submit" class="btn primary big">✓ Save purchase</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ Pay credit dialog ============ -->
+<dialog id="pay-dialog">
+  <form id="pay-form">
+    <div class="dialog-head">
+      <h3>💳 Pay credit</h3>
+      <button type="button" class="btn ghost small" data-close>✕</button>
+    </div>
+    <div class="pay-info" id="pay-info"></div>
+    <div class="form-grid">
+      <label>Date <input type="date" id="pay-date" required></label>
+      <label>Amount <input type="number" id="pay-amount" min="0.01" step="0.01" required></label>
+    </div>
+    <div class="form-err" id="pay-err"></div>
+    <div class="dialog-foot">
+      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="submit" class="btn primary">Record payment</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ Profile / identity dialog ============ -->
+<dialog id="profile-dialog">
+  <form id="profile-form">
+    <div class="dialog-head">
+      <h3>Your shop identity</h3>
+      <button type="button" class="btn ghost small" data-close>✕</button>
+    </div>
+    <p class="dialog-sub">Shown in the top bar and dashboard greeting. Saved on this device only.</p>
+    <div class="form-grid">
+      <label>Your name <input type="text" id="p-owner" maxlength="40" placeholder="e.g. Kwame Mensah"></label>
+      <label>Business name <input type="text" id="p-business" maxlength="60" placeholder="e.g. Prints & Wears"></label>
+      <label class="full">Phone / MoMo (optional) <input type="text" id="p-phone" maxlength="20" placeholder="e.g. 024 123 4567"></label>
+    </div>
+    <div class="appearance">
+      <span class="ap-label">Appearance</span>
+      <div class="seg" role="group" aria-label="Appearance">
+        <button type="button" class="seg-btn active" id="theme-dark">🌙 Dark</button>
+        <button type="button" class="seg-btn" id="theme-light">☀️ Bright</button>
+      </div>
+    </div>
+    <div class="form-err" id="profile-err"></div>
+    <div class="dialog-foot">
+      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="submit" class="btn primary">Save identity</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ Calculator widget (chat-widget style) ============ -->
+<button class="calc-fab" id="calc-fab" aria-label="Open calculator" title="Calculator">🧮</button>
+<div class="calc-shell" id="calc-shell" aria-hidden="true">
+  <div class="calc-head">
+    <span>🧮 Calculator</span>
+    <span class="calc-head-right">
+      <button class="btn ghost small" id="calc-clear" title="Clear (AC)">AC</button>
+      <button class="btn ghost small" id="calc-close" title="Close">✕</button>
+    </span>
+  </div>
+  <div class="calc-screen">
+    <div class="calc-expr" id="calc-expr">&nbsp;</div>
+    <div class="calc-display" id="calc-display">0</div>
+  </div>
+  <div class="calc-keys" id="calc-keys"></div>
+  <div class="calc-foot">works offline · keyboard supported</div>
+</div>
+
+<button class="update-banner hidden" id="update-banner" title="Reload to get the new version">⬆ <strong>New version available</strong> — tap to update</button>
+<div class="toast" id="toast"></div>
+<script src="db.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

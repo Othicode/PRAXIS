@@ -1,0 +1,21 @@
+# ---- runtime data (never commit the shop's ledger) ----
+ledger.db
+ledger.db-journal
+ledger.db-wal
+ledger.db-shm
+
+# ---- test harness scratch ----
+_app_offline.js
+_app_server.js
+_app_*.js
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---- editors / OS ----
+.DS_Store
+Thumbs.db
+*.swp

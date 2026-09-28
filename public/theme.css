@@ -1,0 +1,267 @@
+/* ============================================================
+   PRAXIS shared luxury theme — used by / and /pw-budget/
+   Onyx black · gold leaf · ivory · pure CSS 3D elements
+
+   The token block below is kept byte-identical to the app's
+   (:root in public/app/styles.css) so the landing pages, the
+   download page and PW Budget itself are one single theme.
+   ============================================================ */
+:root {
+  --bg:#07070a;            /* onyx black */
+  --bg2:#0b0b10;
+  --panel:#121218;         /* card */
+  --panel2:#17171f;
+  --ink:#f4efe3;           /* ivory */
+  --sub:#a49b89;           /* warm taupe */
+  --muted:#a49b89;         /* alias: same name the app uses */
+  --line:rgba(212,175,55,.16);
+  --line-soft:rgba(212,175,55,.09);
+  --line2:rgba(212,175,55,.30);
+
+  --gold:#d4af37;          /* gold leaf */
+  --gold-hi:#f7e7a8;       /* champagne */
+  --gold-deep:#8f7022;
+  --gold-grad:linear-gradient(135deg,#f7e7a8 0%,#d4af37 48%,#a8842a 100%);
+
+  --amber:#fbbf24;
+  --green:#34d399;
+  --red:#f87171;
+  --orange:#fb923c;
+  --violet:#a78bfa;
+  --teal:#2dd4bf;
+
+  --radius:14px;           /* card radius (app: --radius) */
+  --btn-radius:12px;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 14px 34px -18px rgba(0,0,0,.75);
+
+  --font:"Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+  --serif:Georgia,"Times New Roman",serif;
+  color-scheme:dark;       /* native selects, scrollbars, form controls */
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+html { scroll-behavior:smooth; }
+body {
+  font-family:var(--font); background:var(--bg); color:var(--ink);
+  line-height:1.6; -webkit-font-smoothing:antialiased;
+  background-image:
+    radial-gradient(ellipse 900px 500px at 80% -10%, rgba(212,175,55,.055), transparent 60%),
+    radial-gradient(ellipse 700px 500px at 10% 110%, rgba(212,175,55,.035), transparent 60%);
+  background-attachment:fixed;
+}
+a { color:inherit; text-decoration:none; }
+img { max-width:100%; }
+.wrap { max-width:1140px; margin:0 auto; padding:0 24px; }
+
+/* ============ nav (identical on every page) ============ */
+.top {
+  position:sticky; top:0; z-index:50;
+  background:rgba(7,7,10,.94); backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--line2);
+  box-shadow:0 12px 30px -18px rgba(0,0,0,.9);
+}
+.top .wrap { display:flex; align-items:center; gap:26px; padding-top:13px; padding-bottom:13px; }
+.logo-link { display:flex; align-items:center; flex:none; }
+.logo-img { height:42px; width:auto; display:block; }
+.logo-sep { width:1px; height:26px; background:var(--line); flex:none; }
+.brand-sub {
+  font-family:var(--serif); font-size:14px; letter-spacing:3px; text-transform:uppercase;
+  color:var(--sub); white-space:nowrap;
+}
+.nav { display:flex; gap:26px; font-size:14.5px; color:var(--sub); font-weight:600; }
+.nav a { transition:color .15s; }
+.nav a:hover { color:var(--gold-hi); }
+.spacer { flex:1; }
+
+/* ============ buttons (same shape / states as the app's .btn) ============ */
+.btn {
+  border:none; cursor:pointer; border-radius:var(--btn-radius); font-weight:700; font-size:14.5px;
+  padding:11px 24px; text-decoration:none; display:inline-flex; align-items:center; gap:8px;
+  transition:transform .12s, box-shadow .2s, filter .15s, border-color .15s, color .15s;
+  position:relative; overflow:hidden; font-family:var(--font);
+}
+.btn:active { transform:scale(.97); }
+.btn:focus-visible, summary:focus-visible, .logo-link:focus-visible {
+  outline:2px solid var(--gold); outline-offset:2px;
+}
+.btn-gold {
+  background:var(--gold-grad); color:#191301;
+  box-shadow:0 8px 18px -10px rgba(212,175,55,.85);
+}
+.btn-gold:hover { filter:brightness(1.07); box-shadow:0 14px 34px -10px rgba(212,175,55,.65); }
+.btn-gold::after {           /* metallic sheen sweep (same on the app's primary btn) */
+  content:""; position:absolute; top:0; left:-80%; width:45%; height:100%;
+  background:linear-gradient(100deg,transparent,rgba(255,255,255,.55),transparent);
+  transform:skewX(-20deg); transition:left .55s ease;
+}
+.btn-gold:hover::after { left:135%; }
+.btn-ghost {
+  background:transparent; color:var(--gold);
+  border:1px solid var(--line2);
+}
+.btn-ghost:hover { background:rgba(212,175,55,.12); border-color:var(--gold); color:var(--gold-hi); }
+.btn-big { padding:15px 32px; font-size:16px; }
+.btn-outline { background:transparent; color:var(--gold-hi); border:1.5px solid rgba(212,175,55,.5); }
+.btn-outline:hover { border-color:var(--gold); background:rgba(212,175,55,.08); }
+
+/* ============ typography helpers ============ */
+.kicker {
+  font-size:12.5px; font-weight:800; letter-spacing:3px; text-transform:uppercase;
+  color:var(--gold);
+}
+.h2 {
+  font-family:var(--serif); font-size:clamp(28px,4vw,44px); font-weight:700;
+  letter-spacing:-.5px; margin:12px 0 10px; color:var(--ink);
+}
+.sub { color:var(--sub); font-size:17px; max-width:660px; }
+.center { text-align:center; }
+.center .sub { margin-left:auto; margin-right:auto; }
+.gold-text {
+  background:var(--gold-grad); -webkit-background-clip:text; background-clip:text; color:transparent;
+}
+
+/* diamond hairline ornament */
+.orn {
+  display:flex; align-items:center; gap:14px; justify-content:center;
+  color:rgba(212,175,55,.6); font-size:12px; letter-spacing:4px; text-transform:uppercase;
+}
+.orn::before, .orn::after {
+  content:""; flex:1; height:1px;
+  background:linear-gradient(90deg,transparent,var(--line));
+}
+.orn::after { background:linear-gradient(90deg,var(--line),transparent); }
+
+/* ============ 3D SCENE — perspective stage ============ */
+.scene { perspective:1100px; perspective-origin:50% 45%; }
+.tilt { transition:transform .3s ease, box-shadow .3s ease; }
+.tilt:hover {
+  transform:rotateX(5deg) rotateY(-5deg) translateY(-5px);
+  box-shadow:0 34px 64px -34px rgba(0,0,0,.85);
+}
+
+/* ---- golden pyramid (pure CSS 3D) ----
+   base side 150 (apothem 75), face panel height = slant 121
+   -> tilt from vertical = asin(75/121) = 38.3deg, apex height ~95 */
+.pyr-stage { position:relative; width:360px; height:360px; display:grid; place-items:center; }
+.pyr-float { animation:pyrFloat 7s ease-in-out infinite alternate; transform-style:preserve-3d; }
+.pyr-spin  { transform-style:preserve-3d; animation:pyrSpin 32s linear infinite; }
+.pyr {
+  position:relative; width:150px; height:96px; transform-style:preserve-3d;
+  transform:rotateX(12deg);                 /* view slightly from above */
+}
+.pyr .f {
+  position:absolute; left:0; bottom:0; width:150px; height:121px;
+  clip-path:polygon(50% 0,100% 100%,0 100%);
+  transform-origin:50% 100%;
+}
+.pyr .base {
+  position:absolute; left:0; top:0; width:150px; height:150px;
+  background:#241c08; transform:translateY(21px) rotateX(90deg);
+}
+.pyr .f1 { transform:rotateY(0deg)   translateZ(75px) rotateX(38.3deg);
+  background:linear-gradient(160deg,#f7e7a8,#d4af37 70%); }
+.pyr .f2 { transform:rotateY(90deg)  translateZ(75px) rotateX(38.3deg);
+  background:linear-gradient(160deg,#c9a233,#9c7c23); }
+.pyr .f3 { transform:rotateY(180deg) translateZ(75px) rotateX(38.3deg);
+  background:linear-gradient(160deg,#7a5f1d,#4a3a10); }
+.pyr .f4 { transform:rotateY(270deg) translateZ(75px) rotateX(38.3deg);
+  background:linear-gradient(160deg,#a8842a,#6f5718); }
+.pyr-glow {
+  position:absolute; left:50%; top:56%; width:340px; height:340px;
+  transform:translate(-50%,-50%); border-radius:50%; pointer-events:none;
+  background:radial-gradient(circle,rgba(212,175,55,.20),rgba(212,175,55,.05) 45%,transparent 70%);
+}
+.orbit {
+  position:absolute; left:50%; top:70%; width:300px; height:300px;
+  transform:translate(-50%,-50%) rotateX(74deg);
+  border:1px solid rgba(212,175,55,.35); border-radius:50%; pointer-events:none;
+  animation:orbitSpin 26s linear infinite;
+}
+.orbit::after {
+  content:""; position:absolute; top:-5px; left:50%; width:9px; height:9px;
+  border-radius:50%; background:var(--gold-hi);
+  box-shadow:0 0 14px 3px rgba(247,231,168,.8);
+}
+
+@keyframes pyrSpin  { from{transform:rotateY(0)} to{transform:rotateY(360deg)} }
+@keyframes pyrFloat { from{transform:translateY(-10px)} to{transform:translateY(10px)} }
+@keyframes orbitSpin{ from{transform:translate(-50%,-50%) rotateX(74deg) rotateZ(0)}
+                      to{transform:translate(-50%,-50%) rotateX(74deg) rotateZ(360deg)} }
+
+/* ---- wireframe cube (pure CSS 3D, decorative) ---- */
+.cube { position:absolute; width:var(--s,90px); height:var(--s,90px); transform-style:preserve-3d; }
+.cube i {
+  position:absolute; inset:0; border:1px solid rgba(212,175,55,.30);
+  background:rgba(212,175,55,.035);
+}
+.cube i:nth-child(1){ transform:translateZ(calc(var(--s,90px)/2)); }
+.cube i:nth-child(2){ transform:rotateY(180deg) translateZ(calc(var(--s,90px)/2)); }
+.cube i:nth-child(3){ transform:rotateY(90deg)  translateZ(calc(var(--s,90px)/2)); }
+.cube i:nth-child(4){ transform:rotateY(-90deg) translateZ(calc(var(--s,90px)/2)); }
+.cube i:nth-child(5){ transform:rotateX(90deg)  translateZ(calc(var(--s,90px)/2)); }
+.cube i:nth-child(6){ transform:rotateX(-90deg) translateZ(calc(var(--s,90px)/2)); }
+.cube.c1 { animation:cubeA 34s linear infinite; }
+.cube.c2 { animation:cubeB 44s linear infinite; }
+.cube.c3 { animation:cubeA 52s linear infinite reverse; }
+@keyframes cubeA { from{transform:rotateX(18deg) rotateY(0)}   to{transform:rotateX(18deg) rotateY(360deg)} }
+@keyframes cubeB { from{transform:rotateY(-14deg) rotateX(0)}  to{transform:rotateY(-14deg) rotateX(360deg)} }
+
+/* ---- word cube (story section) ---- */
+.wordcube-scene { perspective:1000px; display:grid; place-items:center; min-height:300px; }
+.wordcube { position:relative; width:210px; height:210px; transform-style:preserve-3d;
+  animation:wcSpin 24s linear infinite; }
+.wordcube .wf {
+  position:absolute; inset:0; display:grid; place-items:center; text-align:center;
+  border:1px solid rgba(212,175,55,.5);
+  background:linear-gradient(155deg,rgba(23,23,31,.96),rgba(12,12,17,.96));
+  font-family:var(--serif); font-size:21px; font-weight:700; letter-spacing:2px;
+  color:var(--gold-hi); padding:16px; line-height:1.3;
+  box-shadow:inset 0 0 40px rgba(212,175,55,.08);
+}
+.wordcube .wf small { display:block; font-size:11.5px; letter-spacing:2.5px;
+  color:var(--sub); font-family:var(--font); font-weight:600; margin-top:8px;
+  text-transform:uppercase; font-style:normal; }
+.wordcube .wf1 { transform:translateZ(105px); }
+.wordcube .wf2 { transform:rotateY(180deg) translateZ(105px); }
+.wordcube .wf3 { transform:rotateY(90deg)  translateZ(105px); }
+.wordcube .wf4 { transform:rotateY(-90deg) translateZ(105px); }
+.wordcube .wf5 { transform:rotateX(90deg)  translateZ(105px);
+  background:var(--gold-grad); color:#191301; border-color:rgba(255,255,255,.3); }
+.wordcube .wf6 { transform:rotateX(-90deg) translateZ(105px); }
+@keyframes wcSpin { from{transform:rotateX(-16deg) rotateY(0)} to{transform:rotateX(-16deg) rotateY(360deg)} }
+.wordcube-scene:hover .wordcube { animation-play-state:paused; }
+
+/* ============ cards (identical construction to the app's .card) ============ */
+.panel {
+  background:linear-gradient(165deg,var(--panel),#0e0e14);
+  border:1px solid var(--line); border-radius:var(--radius);
+  box-shadow:var(--shadow);
+}
+.badge {
+  display:inline-flex; align-items:center; gap:7px; padding:6px 14px; border-radius:20px;
+  font-size:12px; font-weight:800; letter-spacing:2px; text-transform:uppercase;
+}
+.badge-live { background:rgba(52,211,153,.15); border:1px solid rgba(52,211,153,.5); color:var(--green); }
+.badge-soon { background:rgba(212,175,55,.10); border:1px solid var(--line); color:var(--sub); }
+
+/* ============ footer (identical on every page) ============ */
+.foot { border-top:1px solid var(--line); background:#050507; padding:54px 0 30px;
+  font-size:14px; color:var(--sub); margin-top:0; }
+.foot-grid { display:grid; grid-template-columns:1.5fr 1fr 1fr; gap:34px; }
+.foot-logo { height:36px; width:auto; }
+.foot p { margin-top:14px; font-size:13.5px; max-width:300px; }
+.foot h4 { color:var(--ink); font-size:12.5px; text-transform:uppercase; letter-spacing:1.6px;
+  margin-bottom:13px; }
+.foot a { display:block; padding:5px 0; transition:color .15s; }
+.foot a:hover { color:var(--gold-hi); }
+.foot-bottom { border-top:1px solid var(--line-soft); margin-top:38px; padding-top:22px;
+  display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px; font-size:13px; }
+.motto-line { font-family:var(--serif); font-style:italic; color:rgba(212,175,55,.8); }
+
+/* ============ responsive ============ */
+@media (max-width:840px) {
+  .nav { display:none; }
+  .foot-grid { grid-template-columns:1fr; }
+}
+@media (prefers-reduced-motion:reduce) {
+  *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; }
+}

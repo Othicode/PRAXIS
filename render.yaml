@@ -1,0 +1,42 @@
+# PW Budget — Render blueprint (server mode)
+#
+# Deploy:  push this repo to GitHub -> Render dashboard -> New -> Blueprint
+#          (render.yaml is picked up automatically), or "New + -> Web Service"
+#          and paste the commands below.
+#
+# What you get: the PRAXIS landing page at /, the download site at /pw-budget/
+# and the PWA at /app/ — all served by the dependency-free Python server, with
+# the /api backend live (real server mode, not the offline fallback).
+#
+# Want a pure static site instead (no backend)? Create a "Static Site" and use
+#   Build command: (leave empty)
+#   Publish directory: public
+#   The PWA still works: app.js detects the missing /api and switches to its
+#   offline localStorage engine automatically.
+
+services:
+  - type: web
+    name: pw-budget
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /
+    envVars:
+      # Render injects its own $PORT; the server binds 0.0.0.0 when HOST is set.
+      - key: HOST
+        value: "0.0.0.0"
+      # ledger.db lives on the instance filesystem (ephemeral on the free
+      # plan — wiped on every deploy). On a paid plan add a disk and point
+      # the database at it: add
+      #
+      #   disk:
+      #     name: ledger
+      #     mountPath: /var/data
+      #     sizeGB: 1
+      #
+      # and add the env var below:
+      #   - key: PWBUDGET_DATA_DIR
+      #     value: /var/data
+      - key: PYTHON_VERSION
+        value: "3.12.7"
