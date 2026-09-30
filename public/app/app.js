@@ -1437,9 +1437,15 @@ function calcEval(src) {
     if (/[0-9.]/.test(c)) {
       let j = i;
       while (j < S.length && /[0-9.]/.test(S[j])) j++;
-      toks.push({ t: "num", v: parseFloat(S.slice(i, j)) });
+      const raw = S.slice(i, j);
+      if ((raw.match(/\./g) || []).length > 1) return NaN;   // "5..3" -> reject, don't truncate to 5
+      toks.push({ t: "num", v: parseFloat(raw) });
       i = j;
-    } else if ("+-×÷".includes(c)) { toks.push({ t: "op", v: c }); i++; }
+    } else if (c === "+" || c === "-" || c === "\u2212") {
+      // normalise: the keypad's minus key is U+2212 MINUS SIGN, ± and hand
+      // typing produce ASCII hyphen. The parser below only matches "-".
+      toks.push({ t: "op", v: c === "+" ? "+" : "-" }); i++;
+    } else if (c === "\u00d7" || c === "\u00f7") { toks.push({ t: "op", v: c }); i++; }
     else if (c === "^") { toks.push({ t: "op", v: "^" }); i++; }
     else if (c === "%") { toks.push({ t: "pct" }); i++; }
     else if (c === "√") { toks.push({ t: "fn", v: "√" }); i++; }
@@ -1476,8 +1482,10 @@ function calcEval(src) {
     return v;
   };
   const power = () => {
-    let v = unary();
-    if (peek() && peek().t === "op" && peek().v === "^") { take(); return Math.pow(v, unary()); }
+    const v = unary();
+    // right-associative and recursive, so 2^3^2 = 2^(3^2) and a chained
+    // "x²" (which appends ^2) isn't silently swallowed by term()/expr().
+    if (peek() && peek().t === "op" && peek().v === "^") { take(); return Math.pow(v, power()); }
     return v;
   };
   const unary = () => {

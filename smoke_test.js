@@ -116,7 +116,7 @@ module.exports = {
   loadAnalytics, loadBudget, loadBranches,
   openEntryDialog, openPayDialog, updateCreditMode, updateLiveBox,
   submitEntry, submitPay, recommendedRows, saveBudget, addBranch, refreshMeta,
-  calcEval, calcPush,
+  calcEval, calcPush, CALC_KEYS,
   daysSince, ageTone, agePill, buildAlerts, renderAlerts, updateCreditBadge,
   applyTheme, currentTheme, toggleTheme,
 };
@@ -428,6 +428,38 @@ async function runMode(mode) {
     pw.calcPush("AC");
     ["5", "÷", "0", "="].forEach((k) => pw.calcPush(k));
     return get("calc-display").textContent === "Error";
+  });
+
+  // Regression guards. The keypad's minus key is U+2212 MINUS SIGN while the
+  // tokenizer originally only accepted ASCII "-", so subtraction silently
+  // returned "Error" — no earlier test happened to use minus, which is how it
+  // shipped. Drive the real key, not a hard-coded guess at its spelling.
+  const minusKey = pw.CALC_KEYS.find((k) => k === "-" || k === "\u2212");
+  await check(mode + ": calc subtracts with the keypad's minus key", () => {
+    if (!minusKey) return false;
+    pw.calcPush("AC");
+    ["7", minusKey, "3", "="].forEach((k) => pw.calcPush(k));
+    return get("calc-display").textContent === "4";
+  });
+  await check(mode + ": calc subtract down to a negative result", () => {
+    pw.calcPush("AC");
+    ["1", "0", minusKey, "2", "0", "="].forEach((k) => pw.calcPush(k));
+    return get("calc-display").textContent === "-10";
+  });
+  await check(mode + ": calc minus composes with + and precedence", () => {
+    pw.calcPush("AC");
+    ["7", minusKey, "3", "+", "1", "="].forEach((k) => pw.calcPush(k));
+    const a = get("calc-display").textContent;
+    pw.calcPush("AC");
+    ["8", minusKey, "2", "×", "3", "="].forEach((k) => pw.calcPush(k));
+    return a === "5" && get("calc-display").textContent === "2";
+  });
+  await check(mode + ": calc chained x² is not silently dropped", () => {
+    // "2 x² x²" builds "2^2^2"; a non-recursive power() swallowed the tail
+    // and answered 4 instead of 16.
+    pw.calcPush("AC");
+    ["2", "x²", "x²", "="].forEach((k) => pw.calcPush(k));
+    return get("calc-display").textContent === "16";
   });
 
   fs.unlinkSync(path.join(__dirname, `_app_${mode}.js`));

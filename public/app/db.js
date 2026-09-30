@@ -406,11 +406,10 @@ function createPurchase(payload) {
   const distRaw = String(payload.distributor || "").trim().slice(0, 80);
   if (!distRaw) return { status: 400, body: { error: "distributor name is required" } };
 
-  const did = distributorId(distRaw);
-  const [pId, unitOut] = productId(productRaw, unit);
-  unit = unitOut;
-  const unitPrice = r4(total / qty);
-
+  // Validate the credit amount BEFORE distributorId()/productId(): those two
+  // create records and save() immediately, so a rejected purchase would
+  // otherwise leave an orphan distributor/product behind (the server avoids
+  // this because its uncommitted INSERTs roll back when it returns 400).
   let creditTotal = null, creditPaid = null;
   if (pm === "Credit") {
     creditTotal = total;
@@ -422,6 +421,11 @@ function createPurchase(payload) {
     }
     creditPaid = r2(creditPaid);
   }
+
+  const did = distributorId(distRaw);
+  const [pId, unitOut] = productId(productRaw, unit);
+  unit = unitOut;
+  const unitPrice = r4(total / qty);
 
   const id = nextId();
   DB.purchases.push({

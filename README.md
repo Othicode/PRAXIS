@@ -205,6 +205,31 @@ creation + navigation, analytics, and the calculator math. Server smoke data
 is deleted by the harness; run `python tools/cleanup_smoke.py` afterwards if
 anything lingers (it also reports the clean state).
 
+```
+node audit_calculations.js
+```
+
+Answers *"is the arithmetic actually right?"* in three sections:
+
+1. **Calculator** — drives the real `calcEval()`/`calcPush()` with ~70
+   expressions, simulated key taps and malformed input. Guards against the
+   class of bug where the keypad's `−` (U+2212) didn't match the tokenizer's
+   ASCII `-` and every subtraction answered *Error*.
+2. **Engine parity** — replays one identical call sequence against the offline
+   engine *and* a live `server.py`, then requires matching status codes,
+   figures and error strings. Opaque row ids are ignored (the engines ship
+   different seed catalogs by design); everything else must match, because a
+   user should see the same numbers online and offline.
+3. **Invariants** — arithmetic that must hold whatever the engine: credit
+   `paid + balance == total`, `qty × unit_price == total`, every analytics
+   breakdown summing to its total, `spendable == total - save`, allocation
+   percents summing to 100 after 1dp rounding, and the validation rules that
+   keep them true.
+
+Self-contained — it starts its own server on a free port against a throwaway
+data directory, so it never touches your real `ledger.db`. Exit code is
+non-zero on any failure.
+
 ## Tools / config
 
 - `tools/make_icons.py` — regenerate the PWA icons **and** `public/favicon.ico`
