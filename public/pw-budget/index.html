@@ -43,7 +43,12 @@
 .hero .fineprint { margin-top:16px; font-size:13px; color:var(--sub); }
 
 /* ---- product showcase ---- */
-.product { padding:36px 0 84px; }
+.product {
+  /* longhands, NOT the padding shorthand: this element is also .wrap, and a
+     shorthand here would override .wrap's left/right gutter (this file's
+     <style> loads after theme.css at equal specificity). */
+  padding-top:36px; padding-bottom:84px;
+}
 .product-card {
   display:block; border-radius:18px; overflow:hidden; position:relative;
   background:linear-gradient(135deg,#161207 0%,#241c08 55%,#3a2e0e 100%);
@@ -152,9 +157,44 @@ details p { margin-top:12px; color:var(--sub); font-size:14.5px; }
 .final p { color:var(--sub); margin-top:12px; font-size:17px; }
 .final .cta { margin-top:30px; display:flex; gap:14px; justify-content:center; flex-wrap:wrap; }
 
+/* ---- responsive (nav: theme.css swaps the link row for a hamburger) ---- */
+@media (max-width:900px) {
+  section   { padding:44px 0; }
+  .product  { padding-top:24px; padding-bottom:44px; }  /* longhands again */
+  .hero     { padding:64px 0 64px; }
+  .final    { padding:56px 0; }
+
+  .price-card { padding:34px 24px; margin-top:34px; }
+  .price-card .amount { font-size:48px; }
+  .step-card { padding:24px 20px; }
+  .step-card ol li { padding-left:42px; }
+  .feature { padding:22px; }
+  .grid, .steps, .steps3 { gap:16px; margin-top:32px; }
+}
 @media (max-width:860px) {
   .product-card .inner { grid-template-columns:1fr; padding:36px 26px; }
   .product-card .shot { transform:none; }
+}
+@media (max-width:640px) {
+  section   { padding:36px 0; }
+  .product  { padding-top:20px; padding-bottom:36px; }
+  .hero     { padding:52px 0 48px; }
+  .final    { padding:48px 0; }
+
+  .hero p { font-size:16.5px; }
+  .hero .cta { flex-direction:column; }
+  .hero .cta .btn { width:100%; justify-content:center; }
+  .product-card .inner { padding:30px 20px; }
+  .price-card { padding:28px 18px; }
+  .price-card .amount { font-size:42px; }
+  .price-card .amount small { font-size:17px; }
+  .price-card ul { margin:20px auto; }
+  .note { padding:13px 15px; }
+}
+@media (max-width:400px) {
+  /* the counter bubble would otherwise collide with the list text */
+  .step-card ol li { padding-left:0; padding-top:40px; }
+  .step-card ol li::before { top:-2px; }
 }
 </style>
 </head>
@@ -178,6 +218,19 @@ details p { margin-top:12px; color:var(--sub); font-size:14.5px; }
     </nav>
     <span class="spacer"></span>
     <a class="btn btn-gold" href="../app/">Open the app →</a>
+    <button class="nav-toggle" id="nav-toggle" type="button" aria-expanded="false" aria-controls="nav-menu" aria-label="Open menu">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+  <div class="nav-menu" id="nav-menu">
+    <div class="wrap">
+      <a href="#product">Product</a>
+      <a href="#features">Features</a>
+      <a href="#install">Install</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#faq">FAQ</a>
+      <a class="btn btn-gold nav-menu-cta" href="../app/">Open the app →</a>
+    </div>
   </div>
 </div>
 
@@ -384,6 +437,43 @@ details p { margin-top:12px; color:var(--sub); font-size:14.5px; }
     </div>
   </div>
 </footer>
+
+<script>
+/* Mobile navigation: hamburger ⇄ slide-down panel.
+   Desktop keeps the plain .nav link row (see theme.css @900px). */
+(function () {
+  var btn = document.getElementById("nav-toggle");
+  var menu = document.getElementById("nav-menu");
+  if (!btn || !menu) return;
+
+  function setOpen(open) {
+    menu.classList.toggle("open", open);
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    btn.setAttribute("aria-label", open ? "Close menu" : "Open menu");
+  }
+
+  btn.addEventListener("click", function () {
+    setOpen(!menu.classList.contains("open"));
+  });
+  // tapping any link should dismiss the drawer
+  menu.addEventListener("click", function (e) {
+    var t = e.target;
+    if (t && t.closest && t.closest("a")) setOpen(false);
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") setOpen(false);
+  });
+  window.addEventListener("hashchange", function () { setOpen(false); });
+
+  // never leave the drawer state stuck when the viewport grows back
+  var mq = window.matchMedia ? window.matchMedia("(min-width: 901px)") : null;
+  function onWide(e) { if (e.matches) setOpen(false); }
+  if (mq) {
+    if (mq.addEventListener) mq.addEventListener("change", onWide);
+    else if (mq.addListener) mq.addListener(onWide);
+  }
+})();
+</script>
 
 </body>
 </html>

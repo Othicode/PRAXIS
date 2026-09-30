@@ -1,7 +1,7 @@
 /* PW Budget - service worker
    Cache-first: the installed app loads instantly and works with NO internet.
    Bump CACHE when you ship updates so old caches are cleaned automatically. */
-const CACHE = "pwbudget-v14";
+const CACHE = "pwbudget-v15";
 const ASSETS = [
   "./",
   "./index.html",

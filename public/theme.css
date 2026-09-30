@@ -72,6 +72,46 @@ img { max-width:100%; }
 .nav a:hover { color:var(--gold-hi); }
 .spacer { flex:1; }
 
+/* ---- mobile menu ------------------------------------------------------
+   The old behaviour was `.nav { display:none }` under 840px, which left
+   phones with no navigation at all. This is a hamburger + slide-down
+   panel that only exists below the nav breakpoint. ---- */
+.nav-toggle {
+  display:none; flex-direction:column; justify-content:center; align-items:center; gap:5px;
+  width:44px; height:44px; padding:0; flex:none; cursor:pointer;
+  /* `.spacer` already pushes this to the right edge — an auto margin here
+     would steal the free space from it and slide the header CTA left. */
+  background:rgba(212,175,55,.07); border:1px solid var(--line2); border-radius:12px;
+  transition:border-color .15s, background .15s;
+}
+.nav-toggle:hover { border-color:var(--gold); background:rgba(212,175,55,.14); }
+.nav-toggle:focus-visible { outline:2px solid var(--gold); outline-offset:2px; }
+.nav-toggle span { display:block; width:20px; height:2px; border-radius:2px; background:var(--gold-hi); transition:transform .2s, opacity .2s; }
+.nav-toggle[aria-expanded="true"] span:nth-child(1) { transform:translateY(7px) rotate(45deg); }
+.nav-toggle[aria-expanded="true"] span:nth-child(2) { opacity:0; }
+.nav-toggle[aria-expanded="true"] span:nth-child(3) { transform:translateY(-7px) rotate(-45deg); }
+
+.nav-menu { display:none; border-top:1px solid var(--line-soft); background:rgba(7,7,10,.985); }
+.nav-menu.open { display:block; }
+/* needs to out-specify `.top .wrap`, which also matches this inner wrapper */
+.top .nav-menu .wrap {
+  display:flex; flex-direction:column; gap:0;
+  padding-top:4px; padding-bottom:16px;
+}
+.nav-menu a {
+  padding:14px 2px; font-size:16px; font-weight:600; color:var(--sub);
+  border-bottom:1px solid var(--line-soft); min-height:48px;
+  display:flex; align-items:center; transition:color .15s;
+}
+.nav-menu a:last-child { border-bottom:0; }
+.nav-menu a:hover { color:var(--gold-hi); }
+.nav-menu .nav-menu-cta {
+  border-bottom:0; margin-top:16px; padding:14px 24px;
+  justify-content:center; color:#191301;
+}
+/* `.top .wrap` also matches the menu wrapper — out-specify it there too */
+.top .nav-menu .nav-menu-cta { color:#191301; }
+
 /* ============ buttons (same shape / states as the app's .btn) ============ */
 .btn {
   border:none; cursor:pointer; border-radius:var(--btn-radius); font-weight:700; font-size:14.5px;
@@ -257,18 +297,32 @@ img { max-width:100%; }
   display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px; font-size:13px; }
 .motto-line { font-family:var(--serif); font-style:italic; color:rgba(212,175,55,.8); }
 
-/* ============ responsive ============ */
-@media (max-width:840px) {
+/* ============ responsive ============
+   Only selectors theme.css itself defines belong here. Page-specific rules
+   (.hero, .motto, .product-card …) live in each page's own <style>, which
+   loads AFTER this file and would otherwise out-specify them. */
+
+/* Phones & tablets: the link row becomes the hamburger menu. */
+@media (max-width:900px) {
   .nav { display:none; }
-  .foot-grid { grid-template-columns:1fr; }
-}
-@media (max-width:480px) {
-  .wrap { padding:0 18px; }
-  .pyr-stage { transform:scale(.78); }   /* keep the 3D scene inside narrow phones */
-  .hero { padding:64px 0 56px; }
+  .nav-toggle { display:flex; }
+  .foot-grid { grid-template-columns:1fr; gap:28px; }
+  .brand-sub, .logo-sep { display:none; }   /* nowrap taglines would crowd phones */
   .top .wrap { gap:14px; }
-  .brand-sub, .logo-sep { display:none; }  /* nowrap tagline would overflow phones */
-  .btn-big { padding:13px 22px; font-size:15px; }
+  .foot { padding:44px 0 26px; }
+}
+
+/* Small phones: the header CTA moves into the menu so the bar stays calm. */
+@media (max-width:640px) {
+  .wrap { padding:0 18px; }
+  .top .wrap > .btn { display:none; }
+  .top .wrap { padding-top:11px; padding-bottom:11px; }
+  .logo-img { height:36px; }
+  .btn-big { padding:14px 24px; font-size:15.5px; }
+}
+
+@media (max-width:480px) {
+  .foot-bottom { flex-direction:column; gap:6px; }
 }
 @media (prefers-reduced-motion:reduce) {
   *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; }

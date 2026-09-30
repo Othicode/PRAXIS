@@ -106,6 +106,33 @@
   .hero-grid, .story-grid { grid-template-columns:1fr; }
   .motto-grid { grid-template-columns:1fr; }
   .pyr-stage { margin:0 auto; transform:scale(.85); }
+  .story-grid { gap:34px; }
+  /* #products / #story / #contact carry no vertical padding of their own, so
+     on a phone everything would run together — restore a rhythm here. */
+  .hero { padding:72px 0 56px; }
+  .motto { padding:48px 0; }
+  section, .story { padding:44px 0; }
+}
+@media (max-width:640px) {
+  .hero { padding:56px 0 44px; }
+  .motto { padding:40px 0; }
+  section, .story { padding:36px 0; }
+
+  .hero .cta { flex-direction:column; }
+  .hero .cta .btn { width:100%; justify-content:center; }
+  .hero p.lede { font-size:16.5px; }
+  .sub { font-size:16px; }
+}
+@media (max-width:480px) {
+  /* .pyr-stage keeps its 360px layout box — the negative margins pull the
+     surrounding content back in after the visual scale-down. */
+  .pyr-stage { transform:scale(.72); margin:-52px auto; }
+  .motto-card { padding:26px 20px; }
+  .motto-card h3 { font-size:23px; }
+  .product-card { padding:26px 20px; }
+  .contact-card { padding:24px 20px; }
+  .products-grid, .contact-grid { gap:16px; margin-top:32px; }
+  .motto-grid { gap:16px; margin-top:30px; }
 }
 </style>
 </head>
@@ -127,6 +154,17 @@
     </nav>
     <span class="spacer"></span>
     <a class="btn btn-gold" href="#products">Explore our software →</a>
+    <button class="nav-toggle" id="nav-toggle" type="button" aria-expanded="false" aria-controls="nav-menu" aria-label="Open menu">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+  <div class="nav-menu" id="nav-menu">
+    <div class="wrap">
+      <a href="#products">Products</a>
+      <a href="#story">Our story</a>
+      <a href="#contact">Contact</a>
+      <a class="btn btn-gold nav-menu-cta" href="#products">Explore our software →</a>
+    </div>
   </div>
 </div>
 
@@ -347,6 +385,43 @@
     </div>
   </div>
 </footer>
+
+<script>
+/* Mobile navigation: hamburger ⇄ slide-down panel.
+   Desktop keeps the plain .nav link row (see theme.css @900px). */
+(function () {
+  var btn = document.getElementById("nav-toggle");
+  var menu = document.getElementById("nav-menu");
+  if (!btn || !menu) return;
+
+  function setOpen(open) {
+    menu.classList.toggle("open", open);
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    btn.setAttribute("aria-label", open ? "Close menu" : "Open menu");
+  }
+
+  btn.addEventListener("click", function () {
+    setOpen(!menu.classList.contains("open"));
+  });
+  // tapping any link should dismiss the drawer
+  menu.addEventListener("click", function (e) {
+    var t = e.target;
+    if (t && t.closest && t.closest("a")) setOpen(false);
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") setOpen(false);
+  });
+  window.addEventListener("hashchange", function () { setOpen(false); });
+
+  // never leave the drawer state stuck when the viewport grows back
+  var mq = window.matchMedia ? window.matchMedia("(min-width: 901px)") : null;
+  function onWide(e) { if (e.matches) setOpen(false); }
+  if (mq) {
+    if (mq.addEventListener) mq.addEventListener("change", onWide);
+    else if (mq.addListener) mq.addListener(onWide);
+  }
+})();
+</script>
 
 </body>
 </html>

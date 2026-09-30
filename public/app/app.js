@@ -139,6 +139,9 @@ function showInstallUI(show) {
   });
   const b2 = $("#btn-install-2");
   if (b2) b2.classList.toggle("hidden", !show);
+  // the phone "More" sheet carries its own install entry
+  const b3 = $("#btn-install-more");
+  if (b3) b3.classList.toggle("hidden", !show);
 }
 async function promptInstall() {
   if (deferredInstall) {
@@ -642,19 +645,23 @@ async function loadPurchases() {
         creditCell = `<span class="pill paid">${r.credit.percent}% paid</span>`;
       }
     }
+    /* data-label lets styles.css turn each row into a stacked card on
+       phones (table.ledger td[data-label]::before) while desktop keeps
+       the real table + <thead>. */
+    const memo = r.memo ? `<span class="branch-tag memo">${esc(r.memo)}</span>` : "";
     return `<tr>
-      <td>${r.date}</td>
-      <td><strong>${esc(r.distributor)}</strong></td>
-      <td>${esc(r.product)}<br><span class="branch-tag" style="font-size:11px">${esc(r.memo || "")}</span></td>
-      <td class="num">${num(r.quantity)}</td>
-      <td class="num">${curShort(r.unit_price)}</td>
-      <td class="num amt tot">${cur(r.total)}</td>
-      <td>${pill}</td>
-      <td>${creditCell}</td>
-      <td class="branch-tag">${esc(r.branch)}</td>
+      <td data-label="Date">${r.date}</td>
+      <td data-label="Distributor"><strong>${esc(r.distributor)}</strong></td>
+      <td data-label="Item">${esc(r.product)} ${memo}</td>
+      <td class="num" data-label="Qty">${num(r.quantity)}</td>
+      <td class="num" data-label="Unit price">${curShort(r.unit_price)}</td>
+      <td class="num amt tot" data-label="Total">${cur(r.total)}</td>
+      <td data-label="Paid via">${pill}</td>
+      <td data-label="Credit">${creditCell}</td>
+      <td class="branch-tag" data-label="Branch">${esc(r.branch)}</td>
       <td><div class="row-actions">
-        ${r.credit && r.credit.balance > 0.005 ? `<button class="icon-btn" title="Pay credit" data-pay="${r.id}">💳</button>` : ""}
-        <button class="icon-btn" title="Move to branch" data-move="${r.id}">↔</button>
+        ${r.credit && r.credit.balance > 0.005 ? `<button class="icon-btn" title="Pay credit" data-pay="${r.id}">💳 Pay</button>` : ""}
+        <button class="icon-btn" title="Move to branch" data-move="${r.id}">↔ Move</button>
         <button class="icon-btn danger" title="Delete" data-del="${r.id}">🗑</button>
       </div></td>
     </tr>`;
@@ -787,10 +794,10 @@ async function loadAnalytics() {
   const maxSpend = Math.max(...items.map((x) => x.spend), 1);
   $("#item-table").innerHTML = items.map((x, i) => `
     <div class="h-item">
-      <span class="h-name" style="width:150px">${esc(x.product)}</span>
+      <span class="h-name">${esc(x.product)}</span>
       <div class="h-bar"><i style="width:${(x.spend / maxSpend * 100).toFixed(0)}%;background:${PALETTE[i % PALETTE.length]}"></i></div>
       <span class="h-val">${cur(x.spend)}</span>
-      <span class="h-sub" style="width:70px;text-align:right">${x.share}%</span>
+      <span class="h-sub">${x.share}%</span>
     </div>`).join("") || `<div class="h-item"><span class="h-name">No data</span></div>`;
 
   $("#qty-list").innerHTML = a.top_by_qty.map((x) => `
@@ -798,12 +805,14 @@ async function loadAnalytics() {
       <span class="q-val">bought <strong>${num(x.qty)} ${esc(x.unit)}s</strong> · ${x.buys}×</span></div>`).join("");
 
   const maxDist = Math.max(...a.by_distributor.map((d) => d.spend), 1);
-  $("#dist-list").innerHTML = a.by_distributor.map((d, i) => `
+  /* NOTE: #dist-list is the <datalist> in the purchase dialog — the spend-by-
+     distributor list must use its own id or populateDatalists() would wipe it. */
+  $("#dist-spend").innerHTML = a.by_distributor.map((d, i) => `
     <div class="h-item">
       <span class="h-name">${esc(d.name)}</span>
       <div class="h-bar"><i style="width:${(d.spend / maxDist * 100).toFixed(0)}%;background:${PALETTE[(i + 7) % PALETTE.length]}"></i></div>
       <span class="h-val">${cur(d.spend)}</span>
-      <span class="h-sub" style="width:60px;text-align:right">${d.share}%</span>
+      <span class="h-sub">${d.share}%</span>
     </div>`).join("") || `<div class="h-item"><span class="h-name">No data</span></div>`;
 
   const maxPay = Math.max(...a.payment_split.map((p) => p.spend), 1);
@@ -813,7 +822,7 @@ async function loadAnalytics() {
       <span class="h-name">${esc(p.method)}</span>
       <div class="h-bar"><i style="width:${(p.spend / maxPay * 100).toFixed(0)}%;background:${payColors[p.method] || PALETTE[i]}"></i></div>
       <span class="h-val">${cur(p.spend)}</span>
-      <span class="h-sub" style="width:50px;text-align:right">${p.buys}×</span>
+      <span class="h-sub">${p.buys}×</span>
     </div>`).join("");
 
   // unit price trends for top 5
@@ -874,7 +883,7 @@ function renderBudgetBody(b) {
   $("#b-alloc").innerHTML = rows.map((r, i) => `
     <div class="alloc-row">
       <span class="all-name">${esc(r.name)}</span>
-      <input type="number" data-idx="${i}" data-field="percent" value="${r.percent}" min="0" max="100" step="0.1">
+      <input type="number" data-idx="${i}" data-field="percent" value="${r.percent}" min="0" max="100" step="0.1" placeholder="%" title="Percent of the spendable budget" aria-label="Percent of budget for ${esc(r.name)}">
       <span class="al-amt">${cur(spendable * r.percent / 100)}</span>
       <span class="al-actual ${r.actual > (spendable * r.percent / 100) ? "over" : ""}">${cur(r.actual)}</span>
       <button class="al-del" data-del-alloc="${i}" title="remove">✕</button>
@@ -965,6 +974,11 @@ async function switchView(view) {
   $$(".view").forEach((v) => v.classList.add("hidden"));
   $("#view-" + view).classList.remove("hidden");
   document.title = `${TITLES[view][0]} - PW Budget`;
+  /* On phones the Budget/Branches tabs live inside the "More" sheet, so the
+     More tab itself has to light up while one of them is on screen. */
+  const more = $("#nav-more");
+  if (more) more.classList.toggle("active", view === "budget" || view === "branches");
+  closeMore();
   try {
     if (view === "dashboard") await loadDashboard();
     else if (view === "purchases") await loadPurchases();
@@ -973,6 +987,22 @@ async function switchView(view) {
     else if (view === "budget") await loadBudget();
     else await loadBranches();
   } catch (err) { toast(err.message, "err"); }
+}
+
+/* ---------- phone navigation: the "More" bottom sheet ---------- */
+function closeMore() {
+  const sheet = $("#more-sheet"), scrim = $("#more-scrim"), trigger = $("#nav-more");
+  if (sheet) sheet.classList.remove("open");
+  if (scrim) scrim.classList.remove("open");
+  if (trigger) trigger.setAttribute("aria-expanded", "false");
+}
+function toggleMore(force) {
+  const sheet = $("#more-sheet"), scrim = $("#more-scrim"), trigger = $("#nav-more");
+  if (!sheet) return;
+  const open = force === undefined ? !sheet.classList.contains("open") : !!force;
+  sheet.classList.toggle("open", open);
+  if (scrim) scrim.classList.toggle("open", open);
+  if (trigger) trigger.setAttribute("aria-expanded", open ? "true" : "false");
 }
 
 /* ---------- new purchase dialog ---------- */
@@ -1111,11 +1141,25 @@ async function submitPay(e) {
 /* ---------- bindings ---------- */
 function bindAll() {
   $$(".nav-btn").forEach((b) => b.addEventListener("click", () => {
-    if (b.dataset.view) switchView(b.dataset.view);
-    else if (b.id === "btn-calc-nav") toggleCalc();
+    if (b.dataset.view) switchView(b.dataset.view);   // switchView() also closes the More sheet
+    else if (b.id === "btn-calc-nav" || b.id === "btn-calc-more") {
+      closeMore();
+      toggleCalc();
+    }
   }));
   document.querySelectorAll("[data-goto]").forEach((b) =>
     b.addEventListener("click", () => switchView(b.dataset.goto)));
+
+  /* --- phone navigation: "More" tab + bottom sheet --- */
+  const moreBtn = $("#nav-more");
+  if (moreBtn) moreBtn.addEventListener("click", () => toggleMore());
+  const moreClose = $("#more-close");
+  if (moreClose) moreClose.addEventListener("click", closeMore);
+  const moreScrim = $("#more-scrim");
+  if (moreScrim) moreScrim.addEventListener("click", closeMore);
+  const installMore = $("#btn-install-more");
+  if (installMore) installMore.addEventListener("click", () => { closeMore(); promptInstall(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMore(); });
 
   $("#branch-select").addEventListener("change", (e) => {
     state.branch_id = e.target.value ? Number(e.target.value) : null;
@@ -1516,6 +1560,9 @@ function toggleCalc(open) {
   calcOpen = open === undefined ? !calcOpen : !!open;
   $("#calc-shell").classList.toggle("open", calcOpen);
   $("#calc-fab").classList.toggle("active", calcOpen);
+  /* On phones the calculator becomes a bottom sheet that covers the two
+     floating buttons — hide them while it is open (see styles.css). */
+  document.body.classList.toggle("calc-open", calcOpen);
   $("#calc-close").focus();
 }
 

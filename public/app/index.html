@@ -8,8 +8,8 @@
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#07070a">
 <meta name="description" content="Offline stock, distributor, credit &amp; budget tracker with a built-in calculator. Works with no internet after install.">
-<meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="PW Budget">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -86,20 +86,10 @@ setTimeout(function () {
     </div>
   </div>
 
-  <nav class="nav" id="main-nav">
-    <button class="nav-btn active" data-view="dashboard">📊 Dashboard</button>
-    <button class="nav-btn" data-view="purchases">🧾 Purchases</button>
-    <button class="nav-btn" data-view="credits">💳 Credits</button>
-    <button class="nav-btn" data-view="analytics">📈 Analytics</button>
-    <button class="nav-btn" data-view="budget">🎯 Budget</button>
-    <button class="nav-btn" data-view="branches">🏬 Branches</button>
-    <button class="nav-btn" id="btn-calc-nav" title="Calculator">🧮 Calculator</button>
-  </nav>
-
   <div class="top-actions">
-    <span class="offline-badge hidden" id="offline-badge" title="No server is used — your data is saved on this device">Offline · data on device</span>
-    <label class="branch-pick">Branch
-      <select id="branch-select"></select>
+    <span class="offline-badge hidden" id="offline-badge" title="No server is used — your data is saved on this device"><span class="ob-short">Offline</span><span class="ob-long">Offline · data on device</span></span>
+    <label class="branch-pick"><span class="branch-pick-lbl">Branch</span>
+      <select id="branch-select" aria-label="Branch"></select>
     </label>
     <button class="profile-chip" id="profile-chip" title="Your shop identity">
       <span class="avatar" id="profile-avatar">•</span>
@@ -107,8 +97,22 @@ setTimeout(function () {
     </button>
     <button class="btn secondary hidden" id="btn-install" title="Install PW Budget on this device">⤓ Install app</button>
     <button class="theme-btn" id="btn-theme" type="button" aria-pressed="false" aria-label="Switch between bright and dark appearance" title="Switch to bright appearance"><span id="theme-ico">☀️</span></button>
-    <button class="btn primary big" id="btn-new">＋ New Purchase</button>
+    <button class="btn primary big" id="btn-new" aria-label="New purchase">＋<span class="btn-new-txt">New Purchase</span></button>
   </div>
+
+  <!-- One nav for both layouts: phones get it as a fixed bottom tab bar,
+       desktop gets it as the pill row under the header. Single element so
+       the active state and the credit badge stay in sync everywhere. -->
+  <nav class="nav" id="main-nav" aria-label="Sections">
+    <button class="nav-btn active" data-view="dashboard"><span class="nav-ico">📊</span><span class="nav-txt">Dashboard</span></button>
+    <button class="nav-btn" data-view="purchases"><span class="nav-ico">🧾</span><span class="nav-txt">Purchases</span></button>
+    <button class="nav-btn" data-view="credits"><span class="nav-ico">💳</span><span class="nav-txt">Credits</span></button>
+    <button class="nav-btn" data-view="analytics"><span class="nav-ico">📈</span><span class="nav-txt">Analytics</span></button>
+    <button class="nav-btn hide-sm" data-view="budget"><span class="nav-ico">🎯</span><span class="nav-txt">Budget</span></button>
+    <button class="nav-btn hide-sm" data-view="branches"><span class="nav-ico">🏬</span><span class="nav-txt">Branches</span></button>
+    <button class="nav-btn hide-sm" id="btn-calc-nav" title="Calculator"><span class="nav-ico">🧮</span><span class="nav-txt">Calculator</span></button>
+    <button class="nav-btn only-sm" id="nav-more" aria-expanded="false" aria-controls="more-sheet"><span class="nav-ico">☰</span><span class="nav-txt">More</span></button>
+  </nav>
 </header>
 
 <main class="main">
@@ -156,11 +160,11 @@ setTimeout(function () {
   <section id="view-purchases" class="view hidden">
     <div class="card">
       <div class="filters">
-        <input type="text" id="filter-q" placeholder="Search item, memo…">
-        <select id="filter-month"><option value="">All months</option></select>
-        <select id="filter-dist"><option value="">All distributors</option></select>
-        <select id="filter-product"><option value="">All items</option></select>
-        <select id="filter-pay"><option value="">Cash + Credit</option><option value="Cash">Cash</option><option value="Bank Transfer">Bank Transfer</option><option value="Mobile Money">Mobile Money</option><option value="Credit">On Credit</option></select>
+        <input type="search" id="filter-q" placeholder="Search item, memo…" aria-label="Search purchases">
+        <select id="filter-month" aria-label="Month"><option value="">All months</option></select>
+        <select id="filter-dist" aria-label="Distributor"><option value="">All distributors</option></select>
+        <select id="filter-product" aria-label="Item"><option value="">All items</option></select>
+        <select id="filter-pay" aria-label="Payment method"><option value="">Cash + Credit</option><option value="Cash">Cash</option><option value="Bank Transfer">Bank Transfer</option><option value="Mobile Money">Mobile Money</option><option value="Credit">On Credit</option></select>
         <label class="check"><input type="checkbox" id="filter-owed"> Unpaid credit</label>
         <button class="btn ghost" id="btn-reset">Reset</button>
         <span class="grow"></span>
@@ -212,7 +216,7 @@ setTimeout(function () {
       </div>
       <div class="card">
         <div class="card-head"><h3>Spend by distributor</h3></div>
-        <div class="h-list" id="dist-list"></div>
+        <div class="h-list" id="dist-spend"></div>
       </div>
       <div class="card">
         <div class="card-head"><h3>Payment mix</h3></div>
@@ -254,13 +258,28 @@ setTimeout(function () {
     <div class="card">
       <div class="card-head"><h3>Branches / shops</h3></div>
       <div class="branch-add">
-        <input type="text" id="new-branch-name" placeholder="e.g. Tema Branch" maxlength="60">
+        <input type="text" id="new-branch-name" placeholder="e.g. Tema Branch" maxlength="60" aria-label="New branch name">
         <button class="btn primary" id="btn-add-branch">＋ Add branch</button>
       </div>
       <div id="branch-list"></div>
     </div>
   </section>
 </main>
+
+<!-- ============ "More" sheet (phone navigation) ============ -->
+<div class="sheet-scrim" id="more-scrim"></div>
+<aside class="more-sheet" id="more-sheet" aria-label="More sections">
+  <div class="more-head">
+    <strong>More</strong>
+    <button class="icon-btn" id="more-close" type="button" aria-label="Close menu">✕</button>
+  </div>
+  <div class="more-list">
+    <button class="nav-btn" data-view="budget"><span class="nav-ico">🎯</span><span class="nav-txt">Budget</span></button>
+    <button class="nav-btn" data-view="branches"><span class="nav-ico">🏬</span><span class="nav-txt">Branches</span></button>
+    <button class="nav-btn" id="btn-calc-more"><span class="nav-ico">🧮</span><span class="nav-txt">Calculator</span></button>
+    <button class="nav-btn hidden" id="btn-install-more"><span class="nav-ico">⤓</span><span class="nav-txt">Install app</span></button>
+  </div>
+</aside>
 
 <!-- ============ New purchase dialog ============ -->
 <dialog id="entry-dialog">
