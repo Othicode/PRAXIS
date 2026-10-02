@@ -243,6 +243,10 @@ non-zero on any failure.
 
 ## Roadmap ideas
 
+The AI / automation direction (features, inference approach, constraints) is
+written down in [`docs/AI_AUTOMATION_PLAN.md`](docs/AI_AUTOMATION_PLAN.md),
+together with a summary of how this codebase is put together.
+
 - Receipt OCR: snap a supplier invoice → distributor, item, amount pre-filled.
 - Low-stock warnings per item (credit age, budget burn and price-spike
   reminders already ship — see Dashboard).
