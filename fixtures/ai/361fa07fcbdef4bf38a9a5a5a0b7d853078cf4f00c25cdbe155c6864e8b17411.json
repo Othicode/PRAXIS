@@ -1,0 +1,23 @@
+{
+  "request": {
+    "kind": "extract",
+    "payload": {
+      "text": "Ceda supplied 2 bags of powder for 21600 on 22/09/2026"
+    }
+  },
+  "response": {
+    "date": "2026-09-22",
+    "distributor": "Ceda Industrial Supplies",
+    "items": [
+      {
+        "product": "DTF Powder",
+        "unit": "bag",
+        "quantity": 2,
+        "total_amount": 21600
+      }
+    ],
+    "payment_method": "Cash",
+    "memo": "supplied 2 bags",
+    "uncertain": []
+  }
+}

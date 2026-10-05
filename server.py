@@ -35,6 +35,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+import urllib.request
 
 BASE_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = BASE_DIR / "public"
@@ -87,6 +88,33 @@ PBKDF2_ROUNDS = 200_000
 MAX_FAILED_LOGINS = 8            # per IP before a cooldown kicks in
 LOGIN_COOLDOWN_SEC = 300
 
+# ---------------------------------------------------------------------------
+# AI (optional) configuration
+# ---------------------------------------------------------------------------
+# Nothing in here is required to run the app. With no key, every /api/ai/*
+# route falls back to the deterministic heuristic — which is exactly what
+# public/app/db.js implements — so a keyless server and the offline engine
+# answer byte-for-byte alike. audit_calculations.js relies on that and clears
+# AI_API_KEY in the server it spawns.
+#   AI_API_KEY           secret for an OpenAI-compatible endpoint
+#   AI_BASE_URL          default https://api.openai.com/v1 (OpenAI, Groq,
+#                        OpenRouter, DeepSeek, Ollama, ... — needs vision for
+#                        the camera feature)
+#   AI_MODEL             default gpt-4o-mini
+#   AI_TIMEOUT           seconds, default 45
+#   AI_FIXTURES          directory of recorded responses, replayed by request
+#                        digest — the recorded-fixture mock from the plan
+#   AI_FIXTURES_RECORD=1 write model responses into AI_FIXTURES as they land
+AI_API_KEY = os.environ.get("AI_API_KEY") or ""
+AI_BASE_URL = os.environ.get("AI_BASE_URL") or "https://api.openai.com/v1"
+AI_MODEL = os.environ.get("AI_MODEL") or "gpt-4o-mini"
+try:
+    AI_TIMEOUT = float(os.environ.get("AI_TIMEOUT") or "45")
+except ValueError:
+    AI_TIMEOUT = 45.0
+AI_FIXTURES = os.environ.get("AI_FIXTURES") or ""
+AI_FIXTURES_RECORD = os.environ.get("AI_FIXTURES_RECORD") == "1"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS branches (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,6 +157,18 @@ CREATE TABLE IF NOT EXISTS credit_payments (
     memo        TEXT DEFAULT '',
     created_at  TEXT DEFAULT (datetime('now'))
 );
+-- Money IN: takings, deposits, MoMo/bank credits. Without this the app only
+-- ever reports spend, and statement ingest has nowhere to put a credit row.
+CREATE TABLE IF NOT EXISTS income (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    date       TEXT NOT NULL,
+    branch_id  INTEGER NOT NULL REFERENCES branches(id),
+    source     TEXT NOT NULL,
+    reference  TEXT DEFAULT '',
+    amount     REAL NOT NULL CHECK(amount > 0),
+    memo       TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS budgets (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     branch_id        INTEGER REFERENCES branches(id),
@@ -143,6 +183,8 @@ CREATE TABLE IF NOT EXISTS budgets (
 CREATE INDEX IF NOT EXISTS idx_purch_date   ON purchases(date);
 CREATE INDEX IF NOT EXISTS idx_purch_branch ON purchases(branch_id);
 CREATE INDEX IF NOT EXISTS idx_purch_product ON purchases(product_id);
+CREATE INDEX IF NOT EXISTS idx_income_date   ON income(date);
+CREATE INDEX IF NOT EXISTS idx_income_branch ON income(branch_id);
 CREATE TABLE IF NOT EXISTS admin_user (
     id         INTEGER PRIMARY KEY CHECK (id = 1),
     username   TEXT NOT NULL,
@@ -629,6 +671,53 @@ def purchases_query(conn, params):
     return {"rows": out, "total": total, "page": page, "pages": pages, "page_size": page_size}
 
 
+def income_query(conn, params):
+    """Money-in rows. Same envelope as purchases_query — {rows,total,page,
+    pages,page_size} — so every pager and every parity step can treat them
+    alike. `amount` is the money in; unlike purchases there is no quantity or
+    unit price to derive."""
+    where, args = ["1=1"], []
+    if params.get("branch_id"):
+        where.append("i.branch_id = ?")
+        args.append(_to_int(params["branch_id"]))
+    if params.get("month"):
+        where.append("i.date LIKE ?")
+        args.append(params["month"] + "-%")
+    if params.get("frm"):
+        where.append("i.date >= ?")
+        args.append(params["frm"])
+    if params.get("to"):
+        where.append("i.date <= ?")
+        args.append(params["to"])
+    if params.get("q"):
+        like = f"%{params['q']}%"
+        where.append("(i.source LIKE ? OR i.reference LIKE ? OR i.memo LIKE ?)")
+        args.extend([like] * 3)
+
+    base = f"""
+        FROM income i
+        JOIN branches b ON b.id = i.branch_id
+        WHERE {" AND ".join(where)}
+    """
+    total = conn.execute("SELECT COUNT(*) c " + base, args).fetchone()["c"]
+    page = max(1, _to_int(params.get("page"), 1))
+    page_size = min(200, max(1, _to_int(params.get("page_size"), 25)))
+    pages = max(1, (total + page_size - 1) // page_size)
+
+    rows = conn.execute(
+        "SELECT i.*, b.name AS branch " + base +
+        " ORDER BY i.date DESC, i.id DESC LIMIT ? OFFSET ?",
+        args + [page_size, (page - 1) * page_size],
+    ).fetchall()
+
+    out = [{
+        "id": r["id"], "date": r["date"], "branch_id": r["branch_id"],
+        "branch": r["branch"], "source": r["source"], "reference": r["reference"],
+        "amount": r["amount"], "memo": r["memo"],
+    } for r in rows]
+    return {"rows": out, "total": total, "page": page, "pages": pages, "page_size": page_size}
+
+
 def analytics(conn, branch_id=None, months=6):
     today = dt.date.today()
     ml = _month_list(today, months)
@@ -674,6 +763,18 @@ def analytics(conn, branch_id=None, months=6):
         args,
     ).fetchall()
 
+    # money in over the same window, so spend and takings sit side by side
+    inc_scope = "AND i.branch_id = ?" if branch_id is not None else ""
+    inc_args = [first.isoformat()] + ([branch_id] if branch_id is not None else [])
+    income_map = {r["ym"]: (r["income"] or 0) for r in conn.execute(
+        f"""
+        SELECT substr(i.date,1,7) AS ym, SUM(i.amount) AS income
+        FROM income i WHERE i.date >= ? {inc_scope}
+        GROUP BY ym
+        """,
+        inc_args,
+    ).fetchall()}
+
     pay_split = conn.execute(
         f"""
         SELECT p.payment_method AS pm, COUNT(*) AS buys, SUM(p.total_amount) AS spend
@@ -688,11 +789,13 @@ def analytics(conn, branch_id=None, months=6):
     series = [{
         "month": f"{y:04d}-{m:02d}",
         "spend": round(monthly_map.get(f"{y:04d}-{m:02d}", {}).get("spend") or 0, 2),
+        "income": round(income_map.get(f"{y:04d}-{m:02d}") or 0, 2),
         "buys": monthly_map.get(f"{y:04d}-{m:02d}", {}).get("buys") or 0,
         "credit_new": round(monthly_map.get(f"{y:04d}-{m:02d}", {}).get("credit_new") or 0, 2),
     } for y, m in ml]
 
     total_spend = sum(r["spend"] for r in by_item)
+    total_income = sum(income_map.values())
     top_items = [{
         "product": r["product_name"], "unit": r["unit"], "buys": r["buys"],
         "qty": r["qty"], "spend": round(r["spend"], 2),
@@ -736,6 +839,8 @@ def analytics(conn, branch_id=None, months=6):
         "unit_trend": unit_trend,
         "totals": {
             "spend": round(total_spend, 2),
+            "income": round(total_income, 2),
+            "net": round(total_income - total_spend, 2),
             "buys": sum(r["buys"] for r in by_item),
             "items": len(by_item),
             "distributors": len(by_dist),
@@ -842,8 +947,12 @@ def meta(conn):
         "SELECT name, unit_default FROM products ORDER BY name").fetchall()]
     product_options = [{"id": r["id"], "name": r["name"]} for r in conn.execute(
         "SELECT id, name FROM products ORDER BY name").fetchall()]
-    months = [r["m"] for r in conn.execute(
-        "SELECT DISTINCT substr(date,1,7) m FROM purchases ORDER BY m DESC").fetchall()]
+    # months with money in count too — an income-only month must be selectable
+    months = sorted(
+        {r["m"] for r in conn.execute(
+            "SELECT DISTINCT substr(date,1,7) m FROM purchases UNION "
+            "SELECT DISTINCT substr(date,1,7) m FROM income").fetchall()},
+        reverse=True)
     return {
         "currency": CURRENCY,
         "branches": branches,
@@ -860,7 +969,7 @@ def meta(conn):
 # ---------------------------------------------------------------------------
 # Export (CSV / JSON) - all readable business records for research / legal
 # ---------------------------------------------------------------------------
-EXPORT_KINDS = ("purchases", "credits", "budgets", "audit", "analytics")
+EXPORT_KINDS = ("purchases", "income", "credits", "budgets", "audit", "analytics")
 
 
 def _records_from(rows):
@@ -928,6 +1037,624 @@ def to_csv(records):
     for rec in records:
         w.writerow(rec)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# AI extraction layer — phase 1 plumbing (docs/AI_AUTOMATION_PLAN.md)
+# ---------------------------------------------------------------------------
+# The governing rule: the model *proposes*, the human *confirms*, and the
+# existing write path records. Nothing here writes to the database.
+#
+# Every route has a deterministic heuristic implementation that mirrors
+# public/app/db.js exactly. A model is only consulted when AI_API_KEY is set
+# (or a recorded fixture matches), so a keyless server and the offline engine
+# answer identically — audit_calculations.js depends on that.
+
+AI_IMAGE_ERROR = "image extraction needs an AI provider \u2014 paste the text instead"
+AI_NOTHING_ERROR = "nothing to read \u2014 provide text or an image"
+AI_READ_ERROR = "could not read that image \u2014 paste the text instead"
+
+# Checked in order: the first keyword hit wins, so "Mobile Money" beats
+# "money" and both beat "Cash". Mirrored as PAYMENT_HINTS in db.js.
+PAYMENT_HINTS = [
+    ("Mobile Money", ("mobile money", "momo", "telecel", "airteltigo", "mtn momo")),
+    ("Bank Transfer", ("bank transfer", "bank", "transfer", "ghipss", "cheque", "check")),
+    ("Credit", ("credit", "on credit", "owed")),
+    ("Cash", ("cash",)),
+]
+
+ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
+SLASH_DATE_RE = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b")
+WHOLE_DATE_RE = re.compile(r"^\s*(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\s*$")
+_NUM = r"\d+(?:\.\d+)?"
+ITEM_4 = re.compile(rf"^(.+?)\s+({_NUM})\s+([A-Za-z]+)\s+({_NUM})$")
+ITEM_3 = re.compile(rf"^(.+?)\s+({_NUM})\s+({_NUM})$")
+TOTAL_RE = re.compile(rf"^(?:total|grand total|subtotal|amount paid|paid)\D*?({_NUM})\s*$", re.I)
+_STRICT_NUM_RE = re.compile(rf"^-?{_NUM}$")
+
+INSTR_FIELDS = (
+    r"distributor|supplier|vendor|date|payment(?:\s+method)?|method|memo|note|"
+    r"product|item|unit|quantity|qty|amount|total"
+)
+INSTR_SET_RE = re.compile(
+    rf"^\s*(?:set|change|make|update|put|switch)\s+(?:the\s+)?({INSTR_FIELDS})\s*(?:to|=|:|as)\s*(.+)$",
+    re.I)
+INSTR_BARE_RE = re.compile(
+    rf"^\s*({INSTR_FIELDS})\s*(?:is|=|:)\s*(.+)$", re.I)
+
+FIELD_ALIASES = {
+    "distributor": "distributor", "supplier": "distributor", "vendor": "distributor",
+    "date": "date",
+    "payment": "payment_method", "payment method": "payment_method", "method": "payment_method",
+    "memo": "memo", "note": "memo",
+    "product": "product", "item": "product",
+    "unit": "unit",
+    "quantity": "quantity", "qty": "quantity",
+    "amount": "total_amount", "total": "total_amount",
+}
+NUMERIC_FIELDS = {"quantity", "total_amount"}
+TEXT_LIMITS = {"distributor": 80, "product": 80, "unit": 20, "memo": 140}
+
+# Statement headers we understand, lowercased -> canonical column name.
+HEADER_MAP = {
+    "date": "date", "transaction date": "date", "value date": "date", "posting date": "date",
+    "description": "description", "details": "description", "narration": "description",
+    "particulars": "description", "name": "description",
+    "amount": "amount", "debit": "debit", "withdrawal": "debit", "dr": "debit",
+    "credit": "credit", "deposit": "credit", "cr": "credit",
+    "balance": "balance",
+    "reference": "reference", "ref": "reference", "reference no": "reference",
+    "transaction id": "reference", "transaction id": "reference",
+    "transaction reference": "reference",
+}
+
+# The model contract — asked in exactly these words by both engines.
+# audit_calculations.js compares these source literals against db.js's copies,
+# because the server path (env key) and the device path (db.js, key from
+# Settings) must ask the model for the same thing or the two engines drift.
+AI_SYSTEM = "You extract bookkeeping records from receipts, ledger pages and bank statements. Answer with one JSON object only \u2014 no prose, no markdown. Never invent a figure you cannot read: leave it empty and list it under \"uncertain\" as {field, why, options[]}."
+AI_PROMPT_IMAGE = "Read this bookkeeping image and return the purchase draft as JSON: {\"date\":\"YYYY-MM-DD\",\"distributor\":\"\",\"items\":[{\"product\":\"\",\"unit\":\"\",\"quantity\":0,\"total_amount\":0}],\"payment_method\":\"\",\"memo\":\"\"} plus \"uncertain\":[{field,why,options[]}]."
+AI_PROMPT_TEXT_PREFIX = "Turn this note into a purchase draft JSON: {\"date\":\"\",\"distributor\":\"\",\"items\":[{\"product\":\"\",\"unit\":\"\",\"quantity\":0,\"total_amount\":0}],\"payment_method\":\"\",\"memo\":\"\"} plus \"uncertain\":[{field,why,options[]}]. Note:\n"
+AI_PROMPT_INSTRUCT = "Apply this edit to the bookkeeping draft and return only {\"op\":\"update\",\"changes\":{...}} with an empty changes object if the instruction does not name a field. Whitelisted fields: "
+AI_PROMPT_STATEMENT_IMAGE = "Read this statement image and return JSON {\"candidates\":[{\"date\":\"YYYY-MM-DD\",\"direction\":\"out|in\",\"amount\":0,\"description\":\"\",\"reference\":\"\"}],\"uncertain\":[{field,why,options[]}]}."
+AI_PROMPT_STATEMENT_TEXT_PREFIX = "Read this statement text and return JSON {\"candidates\":[{\"date\":\"YYYY-MM-DD\",\"direction\":\"out|in\",\"amount\":0,\"description\":\"\",\"reference\":\"\"}],\"uncertain\":[{field,why,options[]}]}.\n"
+
+
+def _r2(x):
+    """Matches db.js's r2 = Math.round(n * 100) / 100 exactly.
+
+    Python's round() is banker's rounding, so round(0.125, 2) is 0.12 where
+    the JavaScript would say 0.13 — a silent parity break. floor(x + 0.5) is
+    what Math.round does, and on the same float inputs it lands identically.
+    """
+    return (float(x or 0) * 100 + 0.5) // 1 / 100
+
+
+def _has_letter(s):
+    return any(("a" <= c <= "z") or ("A" <= c <= "Z") for c in s)
+
+
+def _find_date(text):
+    """Any date in the text as YYYY-MM-DD, or '' — dd/mm/yyyy is assumed
+    (Ghana/UK order) unless the other component is impossible."""
+    m = ISO_DATE_RE.search(text)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            return f"{y:04d}-{mo:02d}-{d:02d}"
+    m = SLASH_DATE_RE.search(text)
+    if m:
+        a, b, c = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        y = c + 2000 if c < 100 else c
+        if a > 12 and b <= 12:
+            day, mon = a, b
+        elif b > 12 and a <= 12:
+            day, mon = b, a
+        else:
+            day, mon = a, b
+        if 1 <= mon <= 12 and 1 <= day <= 31:
+            return f"{y:04d}-{mon:02d}-{day:02d}"
+    return ""
+
+
+def _find_payment(text):
+    low = text.lower()
+    for name, keys in PAYMENT_HINTS:
+        for k in keys:
+            if k in low:
+                return name
+    return ""
+
+
+def _draft_uncertain(draft, total_line=None):
+    """What a human should double-check before this draft is recorded.
+    Shared by the heuristic and the model path so the shape never drifts."""
+    items = draft.get("items") or []
+    out = []
+    if total_line is not None and len(items) > 1:
+        out.append({
+            "field": "total_amount",
+            "why": "the total does not match the line items",
+            "options": [_r2(sum(float(i.get("total_amount") or 0) for i in items)),
+                        _r2(total_line)],
+        })
+    if not draft.get("date"):
+        out.append({"field": "date", "why": "no date found", "options": []})
+    if not draft.get("distributor"):
+        out.append({"field": "distributor", "why": "no supplier name found", "options": []})
+    if not draft.get("payment_method"):
+        out.append({"field": "payment_method", "why": "no payment method found",
+                    "options": ["Cash", "Credit"]})
+    if not items:
+        out.append({"field": "items", "why": "no item lines matched", "options": []})
+    for i, it in enumerate(items):
+        if not it.get("unit"):
+            out.append({"field": f"items[{i}].unit", "why": "unit not readable",
+                        "options": UNIT_SUGGESTIONS[:6]})
+        if not (float(it.get("quantity") or 0) > 0):
+            out.append({"field": f"items[{i}].quantity", "why": "quantity not readable",
+                        "options": []})
+        if not (float(it.get("total_amount") or 0) > 0):
+            out.append({"field": f"items[{i}].total_amount", "why": "amount not readable",
+                        "options": []})
+    return out
+
+
+def _extract_draft(text):
+    """Turn pasted/scribed text into a purchase draft. Deliberately simple —
+    db.js runs this same sequence, so any cleverness here is drift risk."""
+    draft = {"date": "", "distributor": "", "items": [],
+             "payment_method": "", "memo": ""}
+    total_line = None
+    memos = []
+
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if WHOLE_DATE_RE.match(line):
+            if not draft["date"]:
+                draft["date"] = _find_date(line)
+            continue
+        m = ITEM_4.match(line)
+        if m:
+            draft["items"].append({
+                "product": m.group(1).strip()[:80],
+                "quantity": _to_float(m.group(2)),
+                "unit": m.group(3)[:20],
+                "total_amount": _to_float(m.group(4)),
+            })
+            continue
+        m = ITEM_3.match(line)
+        if m:
+            draft["items"].append({
+                "product": m.group(1).strip()[:80],
+                "quantity": _to_float(m.group(2)),
+                "unit": "",
+                "total_amount": _to_float(m.group(3)),
+            })
+            continue
+        m = TOTAL_RE.match(line)
+        if m:
+            total_line = _to_float(m.group(1))
+            continue
+        pm = _find_payment(line)
+        # ASCII range, not str.isdigit(): Python counts superscripts like '²'
+        # as digits and JavaScript's \d does not.
+        if pm and not any("0" <= c <= "9" for c in line):
+            draft["payment_method"] = pm
+            continue
+        d = _find_date(line)
+        if d:
+            if not draft["date"]:
+                draft["date"] = d
+            continue
+        if not draft["distributor"] and _has_letter(line):
+            draft["distributor"] = line[:80]
+            continue
+        if _has_letter(line):
+            memos.append(line[:140])
+
+    # A receipt's printed total is authoritative when there is a single line.
+    items = draft["items"]
+    if total_line is not None and len(items) == 1:
+        items[0]["total_amount"] = total_line
+
+    if memos:
+        draft["memo"] = "; ".join(memos)[:140]
+    return draft, _draft_uncertain(draft, total_line)
+
+
+def _normalise_draft(obj):
+    """Keep only the keys we know about, in the shape the UI expects. The
+    model is never trusted to choose its own schema."""
+    src = obj if isinstance(obj, dict) else {}
+    items = src.get("items") if isinstance(src.get("items"), list) else []
+    out_items = []
+    for it in items[:50]:
+        if not isinstance(it, dict):
+            continue
+        out_items.append({
+            "product": str(it.get("product") or "").strip()[:80],
+            "unit": str(it.get("unit") or "").strip()[:20],
+            "quantity": _to_float(it.get("quantity")),
+            "total_amount": _to_float(it.get("total_amount")),
+        })
+    pm = str(src.get("payment_method") or "").strip()
+    return {
+        "date": _find_date(str(src.get("date") or "")) or "",
+        "distributor": str(src.get("distributor") or "").strip()[:80],
+        "items": out_items,
+        "payment_method": pm if pm in PAYMENT_METHODS else "",
+        "memo": str(src.get("memo") or "").strip()[:140],
+    }
+
+
+# -- model / fixture plumbing -----------------------------------------------
+def _ai_available():
+    return bool(AI_API_KEY or AI_FIXTURES)
+
+
+def _fixture_file(kind, payload):
+    if not AI_FIXTURES:
+        return None
+    blob = json.dumps({"kind": kind, "payload": payload}, sort_keys=True,
+                      ensure_ascii=False, default=str)
+    digest = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    return Path(AI_FIXTURES) / f"{digest}.json"
+
+
+def _fixture_read(kind, payload):
+    fp = _fixture_file(kind, payload)
+    if not fp or not fp.is_file():
+        return None
+    try:
+        return json.loads(fp.read_text(encoding="utf-8")).get("response")
+    except (OSError, ValueError):
+        return None
+
+
+def _fixture_write(kind, payload, response):
+    fp = _fixture_file(kind, payload)
+    if not fp:
+        return
+    try:
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_text(json.dumps(
+            {"request": {"kind": kind, "payload": payload}, "response": response},
+            ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _ai_chat(prompt, image=None):
+    """OpenAI-compatible chat completion. Returns the model's text, or None on
+    any failure — an unreachable model must never break a core path."""
+    content = [{"type": "text", "text": prompt}]
+    if image:
+        url = image if str(image).startswith("data:") else f"data:image/jpeg;base64,{image}"
+        content.append({"type": "image_url", "image_url": {"url": url}})
+    body = json.dumps({
+        "model": AI_MODEL, "temperature": 0,
+        "messages": [{"role": "system", "content": AI_SYSTEM},
+                     {"role": "user", "content": content}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{AI_BASE_URL.rstrip('/')}/chat/completions", data=body,
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {AI_API_KEY}"})
+    try:
+        with urllib.request.urlopen(req, timeout=AI_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        text = data["choices"][0]["message"]["content"].strip()
+    except Exception:  # noqa: BLE001 — network, timeout, bad payload, bad JSON
+        return None
+    if text.startswith("```"):
+        text = re.sub(r"^```[A-Za-z]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    return text
+
+
+def ai_call(kind, payload, prompt):
+    """fixture -> model -> None (caller falls back to the heuristic).
+    Returns (parsed_json, source) where source is 'fixture' or 'model'."""
+    fx = _fixture_read(kind, payload)
+    if fx is not None:
+        return fx, "fixture"
+    if not AI_API_KEY:
+        return None, ""
+    text = _ai_chat(prompt, payload.get("image"))
+    if text is None:
+        return None, ""
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None, ""
+    if AI_FIXTURES:
+        _fixture_write(kind, payload, parsed)
+    return parsed, "model"
+
+
+def _ai_input(payload):
+    """(text, image, error) — a shared guard so all three routes refuse the
+    same way. Images need a model; text never does."""
+    text = str(payload.get("text") or "")
+    image = str(payload.get("image") or "")
+    if not text.strip() and not image:
+        return "", "", {"error": AI_NOTHING_ERROR}
+    if image and not text.strip() and not _ai_available():
+        return "", "", {"error": AI_IMAGE_ERROR}
+    return text, image, None
+
+
+# -- route handlers ---------------------------------------------------------
+def ai_extract(payload):
+    text, image, err = _ai_input(payload)
+    if err:
+        return 400, err
+
+    if image and not text.strip():
+        # Only a model can read pixels; a heuristic on an empty string would
+        # quietly hand back a blank draft.
+        got, source = ai_call("extract", {"image": image}, AI_PROMPT_IMAGE)
+        if got is None:
+            return 400, {"error": AI_READ_ERROR}
+        draft = _normalise_draft(got)
+        return 200, {"ok": True, "draft": draft,
+                     "uncertain": _draft_uncertain(draft), "source": source}
+
+    # `context` is the user's scope at work: names/figures the owner has
+    # allowed the model to see. Absent or empty it changes nothing, which is
+    # how audit_calculations.js keeps replaying the recorded fixtures.
+    ctx = str(payload.get("context") or "").strip()
+    fixture = {"text": text}
+    if ctx:
+        fixture["context"] = ctx
+
+    if _ai_available():
+        got, source = ai_call(
+            "extract", fixture,
+            AI_PROMPT_TEXT_PREFIX + (ctx + "\n" if ctx else "") + text)
+        if got is not None:
+            draft = _normalise_draft(got)
+            uncertain = got.get("uncertain") if isinstance(got.get("uncertain"), list) else []
+            return 200, {"ok": True, "draft": draft,
+                         "uncertain": uncertain, "source": source}
+
+    draft, uncertain = _extract_draft(text)
+    return 200, {"ok": True, "draft": draft, "uncertain": uncertain, "source": "heuristic"}
+
+
+def _validate_change(field, value):
+    """-> (True, normalised value) or (False, error message)."""
+    raw = str(value or "").strip()
+    if field == "date":
+        d = _find_date(raw)
+        return (True, d) if d else (False, "date must be YYYY-MM-DD")
+    if field == "payment_method":
+        for pm in PAYMENT_METHODS:
+            if pm.lower() == raw.lower():
+                return True, pm
+        hit = _find_payment(raw)
+        if hit:
+            return True, hit
+        return False, f"payment_method must be one of: {', '.join(PAYMENT_METHODS)}"
+    if field in NUMERIC_FIELDS:
+        num = raw.replace(",", "")
+        if not _STRICT_NUM_RE.match(num) or not float(num) > 0:
+            return False, f"{field} must be a positive number"
+        return True, _r2(float(num))
+    limit = TEXT_LIMITS.get(field, 80)
+    if not raw:
+        return False, f"{field} is required"
+    return True, raw[:limit]
+
+
+def _apply_patch(changes):
+    """Model output passes through the same whitelist as user text. Anything
+    that fails validation is dropped — never applied."""
+    clean = {}
+    for field, value in (changes or {}).items():
+        name = FIELD_ALIASES.get(str(field).strip().lower())
+        if not name:
+            continue
+        ok_flag, out = _validate_change(name, value)
+        if ok_flag:
+            clean[name] = out
+    if not clean:
+        return {"op": "none", "changes": {}}
+    return {"op": "update", "target": "purchase_draft", "changes": clean}
+
+
+def ai_instruct(payload):
+    draft = payload.get("draft")
+    if not isinstance(draft, dict):
+        return 400, {"error": "draft is required"}
+    instruction = str(payload.get("instruction") or "").strip()
+    if not instruction:
+        return 400, {"error": "instruction is required"}
+
+    if _ai_available():
+        got, source = ai_call(
+            "instruct", {"draft": draft, "instruction": instruction},
+            AI_PROMPT_INSTRUCT + ", ".join(sorted(set(FIELD_ALIASES.values())))
+            + f".\nDraft: {json.dumps(draft, ensure_ascii=False)}\n"
+            + f"Instruction: {instruction}")
+        if got is not None:
+            patch = _apply_patch(got.get("changes") if isinstance(got, dict) else {})
+            return 200, {"ok": True, "patch": patch, "source": source}
+
+    m = INSTR_SET_RE.match(instruction) or INSTR_BARE_RE.match(instruction)
+    if not m:
+        return 200, {"ok": True, "patch": {"op": "none", "changes": {}},
+                     "source": "heuristic"}
+    field = FIELD_ALIASES[m.group(1).strip().lower()]
+    ok_flag, value = _validate_change(field, m.group(2))
+    if not ok_flag:
+        return 400, {"error": value}
+    return 200, {"ok": True, "source": "heuristic",
+                 "patch": {"op": "update", "target": "purchase_draft",
+                           "changes": {field: value}}}
+
+
+def _split_row(line, delim):
+    cells, cur, quoted, i = [], "", False, 0
+    while i < len(line):
+        ch = line[i]
+        if ch == '"':
+            if quoted and i + 1 < len(line) and line[i + 1] == '"':
+                cur += '"'
+                i += 2
+                continue
+            quoted = not quoted
+            i += 1
+            continue
+        if ch == delim and not quoted:
+            cells.append(cur.strip())
+            cur = ""
+            i += 1
+            continue
+        cur += ch
+        i += 1
+    cells.append(cur.strip())
+    return cells
+
+
+def _cell(cells, idx):
+    if idx is None or idx < 0 or idx >= len(cells):
+        return ""
+    return cells[idx]
+
+
+def _row_numbers(text):
+    src = ISO_DATE_RE.sub(" ", text)
+    src = SLASH_DATE_RE.sub(" ", src)
+    return [float(m.replace(",", "")) for m in re.findall(r"\d[\d,]*(?:\.\d+)?", src)]
+
+
+def _parse_statement(text):
+    """Statement/slip text -> candidate transactions.
+
+    With a header row the columns drive everything (reliable). Without one we
+    fall back to scanning each line, and *say so* through uncertain[] rather
+    than guessing silently — a confident wrong figure is worse than a blank.
+    """
+    lines = [l for l in str(text or "").splitlines() if l.strip()]
+    if not lines:
+        return [], []
+    delim = "\t" if "\t" in lines[0] else (";" if ";" in lines[0] else ",")
+    rows = [_split_row(l, delim) for l in lines]
+
+    cols = {}
+    for i, cell in enumerate(rows[0]):
+        key = HEADER_MAP.get(cell.strip().lower())
+        if key and key not in cols:
+            cols[key] = i
+    data = rows[1:] if cols else rows
+
+    candidates, uncertain = [], []
+    for n, cells in enumerate(data):
+        if not any(c for c in cells):
+            continue
+        row_text = " ".join(cells)
+        date = _find_date(_cell(cells, cols.get("date"))) if "date" in cols \
+            else _find_date(row_text)
+
+        amount, direction = None, None
+        if "debit" in cols or "credit" in cols:
+            dv = _num_cell(cells, cols.get("debit"))
+            cv = _num_cell(cells, cols.get("credit"))
+            if dv is not None and dv > 0:
+                amount, direction = dv, "out"
+            elif cv is not None and cv > 0:
+                amount, direction = cv, "in"
+        if amount is None and "amount" in cols:
+            av = _num_cell(cells, cols.get("amount"))
+            if av is not None and av != 0:
+                amount, direction = abs(av), ("out" if av < 0 else "in")
+
+        if amount is None:
+            found = _row_numbers(row_text)
+            if found:
+                amount = abs(found[0])
+                if len(found) > 1:
+                    uncertain.append({"field": f"rows[{n}].amount",
+                                      "why": "more than one number in the row",
+                                      "options": [_r2(abs(v)) for v in found[:4]]})
+        if amount is None or amount <= 0:
+            uncertain.append({"field": f"rows[{n}].amount",
+                              "why": "amount not readable", "options": []})
+            continue
+        if not date:
+            uncertain.append({"field": f"rows[{n}].date", "why": "no date found",
+                              "options": []})
+
+        if "description" in cols:
+            desc = _cell(cells, cols.get("description"))
+        else:
+            # No description column: take the first readable cell and drop any
+            # date from it, so "2026-09-22 Payment to Ceda" reads as a name.
+            desc = next((c for c in cells if _has_letter(c)), "")
+            if desc:
+                desc = ISO_DATE_RE.sub("", desc)
+                desc = SLASH_DATE_RE.sub("", desc).strip()
+        if direction is None:
+            direction = "out"
+            uncertain.append({"field": f"rows[{n}].direction",
+                              "why": "no debit/credit column \u2014 assumed money out",
+                              "options": ["out", "in"]})
+
+        candidates.append({
+            "date": date,
+            "direction": direction,
+            "amount": _r2(amount),
+            "description": desc[:60],
+            "reference": _cell(cells, cols.get("reference"))[:40],
+        })
+
+    if not candidates:
+        uncertain.append({"field": "candidates", "why": "no transactions found",
+                          "options": []})
+    return candidates, uncertain
+
+
+def _num_cell(cells, idx):
+    if idx is None:
+        return None
+    raw = _cell(cells, idx).replace(",", "")
+    if not _STRICT_NUM_RE.match(raw):
+        return None
+    return float(raw)
+
+
+def ai_statement(payload):
+    text, image, err = _ai_input(payload)
+    if err:
+        return 400, err
+
+    if image and not text.strip():
+        got, source = ai_call(
+            "statement", {"image": image}, AI_PROMPT_STATEMENT_IMAGE)
+        if got is None:
+            return 400, {"error": "could not read that image \u2014 paste the text instead"}
+        cand = got.get("candidates") if isinstance(got.get("candidates"), list) else []
+        unc = got.get("uncertain") if isinstance(got.get("uncertain"), list) else []
+        return 200, {"ok": True, "candidates": cand[:200], "uncertain": unc,
+                     "source": source}
+
+    if _ai_available():
+        got, source = ai_call(
+            "statement", {"text": text},
+            AI_PROMPT_STATEMENT_TEXT_PREFIX + text)
+        if got is not None:
+            cand = got.get("candidates") if isinstance(got.get("candidates"), list) else []
+            unc = got.get("uncertain") if isinstance(got.get("uncertain"), list) else []
+            return 200, {"ok": True, "candidates": cand[:200], "uncertain": unc,
+                         "source": source}
+
+    candidates, uncertain = _parse_statement(text)
+    return 200, {"ok": True, "candidates": candidates, "uncertain": uncertain,
+                 "source": "heuristic"}
 
 
 # ---------------------------------------------------------------------------
@@ -1087,6 +1814,23 @@ class Handler(BaseHTTPRequestHandler):
                 audit(conn, actor, "purchase.delete", f"id={pid}", ip)
                 return self.send_json({"ok": True})
 
+            # ---- income (money in) -----------------------------------------------
+            if path == "/api/income" and method == "GET":
+                p = {k: (v[0] if v else "") for k, v in qs.items()}
+                return self.send_json(income_query(conn, p))
+            if path == "/api/income" and method == "POST":
+                return self._create_income(conn, payload)
+
+            m = re.match(r"^/api/income/(\d+)$", path)
+            if m and method == "DELETE":
+                iid = int(m.group(1))
+                if conn.execute("SELECT id FROM income WHERE id = ?", (iid,)).fetchone() is None:
+                    return self.send_json({"error": "income not found"}, 404)
+                conn.execute("DELETE FROM income WHERE id = ?", (iid,))
+                conn.commit()
+                audit(conn, actor, "income.delete", f"id={iid}", ip)
+                return self.send_json({"ok": True})
+
             # ---- credits ----------------------------------------------------------
             if path == "/api/credits" and method == "GET":
                 bid = _to_int((qs.get("branch_id") or [""])[0]) or None
@@ -1144,6 +1888,20 @@ class Handler(BaseHTTPRequestHandler):
                       f"{year:04d}-{month:02d} branch={bid} total={total} save={save}", ip)
                 return self.send_json({"ok": True, **budget_view(conn, bid, year, month)})
 
+            # ---- AI extraction layer (proposal only — nothing is written) --
+            # See docs/AI_AUTOMATION_PLAN.md. These never touch the database:
+            # they return a draft/patch for a human to confirm, which is then
+            # recorded through the ordinary /api/purchases path.
+            if path == "/api/ai/extract" and method == "POST":
+                status, body = ai_extract(payload or {})
+                return self.send_json(body, status)
+            if path == "/api/ai/instruct" and method == "POST":
+                status, body = ai_instruct(payload or {})
+                return self.send_json(body, status)
+            if path == "/api/ai/statement" and method == "POST":
+                status, body = ai_statement(payload or {})
+                return self.send_json(body, status)
+
             return self.send_json({"error": "not found"}, 404)
         finally:
             conn.close()
@@ -1154,6 +1912,43 @@ class Handler(BaseHTTPRequestHandler):
             return dt.date.fromisoformat(raw)
         except ValueError:
             return "date must be YYYY-MM-DD"
+
+    def _create_income(self, conn, payload):
+        """Money in. Validated in the same order as a purchase — date, branch,
+        the number, then the name — so both engines reject in step."""
+        date = self._valid_date(payload, conn)
+        if isinstance(date, str):
+            return self.send_json({"error": date}, 400)
+
+        bid = _to_int(payload.get("branch_id"))
+        branch = conn.execute("SELECT id FROM branches WHERE id = ?", (bid,)).fetchone() if bid else None
+        if not branch:
+            return self.send_json({"error": "a valid branch_id is required"}, 400)
+
+        # parsed then rounded exactly as db.js's toFloat does (parseFloat -> r2):
+        # round() alone is banker's rounding and would answer 0.12 where the
+        # JavaScript says 0.13.
+        try:
+            amount = _r2(float(str(payload.get("amount"))))
+        except (TypeError, ValueError):
+            amount = 0.0
+        if amount <= 0:
+            return self.send_json({"error": "amount must be greater than zero"}, 400)
+
+        source = str(payload.get("source") or "").strip()[:80]
+        if not source:
+            return self.send_json({"error": "source is required"}, 400)
+
+        cur = conn.execute(
+            "INSERT INTO income(date, branch_id, source, reference, amount, memo) "
+            "VALUES (?,?,?,?,?,?)",
+            (date.isoformat(), bid, source, str(payload.get("reference") or "").strip()[:40],
+             amount, str(payload.get("memo") or "").strip()[:140]),
+        )
+        conn.commit()
+        audit(conn, self._actor(conn), "income.create",
+              f"id={cur.lastrowid} {source} amount={amount}", self._ip())
+        return self.send_json({"ok": True, "id": cur.lastrowid}, 201)
 
     def _create_purchase(self, conn, payload):
         date = self._valid_date(payload, conn)

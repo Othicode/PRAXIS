@@ -16,12 +16,20 @@
                       divergence means a user gets different figures online
                       than offline. Opaque row ids are ignored because the
                       engines ship different seed catalogs by design.
+                      Includes the /api/ai/* extraction routes: the spawned
+                      server has AI_API_KEY cleared so the model path can
+                      never hide a heuristic divergence.
 
      3. INVARIANTS  — arithmetic that must hold no matter the engine: credit
                       paid+balance==total, qty*unit_price==total, analytics
                       breakdowns summing to their totals, budget
                       spendable==total-save, allocation percents summing to
                       100, and the validation rules that keep them true.
+
+     4. FIXTURES    — starts a SECOND server against fixtures/ai and checks the
+                      recorded-fixture replay: a recorded request answers
+                      source="fixture", an unrecorded one falls back to the
+                      heuristic, and a bare image is still a 400.
 
    Self-contained: it starts its OWN server on a free port against a throwaway
    data directory, so it never touches your real ledger.db.
@@ -40,6 +48,8 @@ const r1 = (x) => Math.round((Number(x) || 0) * 10) / 10;
 
 let pass = 0, fail = 0;
 const bad = [];
+// Freed in main()'s finally; set by auditFixtures().
+let tmpDir2 = null;
 function ok(label, cond, detail) {
   if (cond) pass++;
   else { fail++; bad.push(`  ${label}${detail ? "\n     " + detail : ""}`); }
@@ -241,8 +251,10 @@ async function waitForHealth(base, child, ms = 20000) {
 /* ======================================================================
    2/3. shared scenario + invariants
    ====================================================================== */
-const offline = (method, p, qs, body) => {
-  const r = PWDB.request(method, p, qs || {}, body || {});
+const offline = async (method, p, qs, body) => {
+  // awaited: the three /api/ai/* routes may take a model round-trip, so the
+  // offline engine answers each of them with a Promise.
+  const r = await PWDB.request(method, p, qs || {}, body || {});
   return { status: r.status, body: r.body };
 };
 function serverCall(base) {
@@ -329,6 +341,30 @@ async function scenario(call) {
   await step("credits:settled", "GET", "/api/credits");
   await step("purchases:owed after settle", "GET", "/api/purchases", { owed: 1 });
 
+  // income — money in. A sibling table with its own routes, validated in the
+  // same order as a purchase so both engines reject in step. inc1 lands in a
+  // month no purchase touches, so meta.months proves it unions the two tables.
+  await step("income:empty", "GET", "/api/income");
+  await step("income:bad date", "POST", "/api/income", {},
+    { date: "nope", branch_id: bid1, amount: 100, source: "Shop takings" });
+  await step("income:bad branch", "POST", "/api/income", {},
+    { date: "2026-07-14", branch_id: 99999, amount: 100, source: "Shop takings" });
+  await step("income:zero amount", "POST", "/api/income", {},
+    { date: "2026-07-14", branch_id: bid1, amount: 0, source: "Shop takings" });
+  await step("income:no source", "POST", "/api/income", {},
+    { date: "2026-07-14", branch_id: bid1, amount: 100, source: "   " });
+  const inc1 = await step("income:create 5400", "POST", "/api/income", {},
+    { date: "2026-07-14", branch_id: bid1, amount: 5400, source: "Shop takings",
+      reference: "MM9911", memo: "Tuesday takings" });
+  await step("income:create 1250.50", "POST", "/api/income", {},
+    { date: "2026-09-30", branch_id: BR2, amount: 1250.5,
+      source: "MoMo - Kwame", reference: "MM9912" });
+  await step("income:list", "GET", "/api/income", { page: 1, page_size: 50 });
+  await step("income:filter branch", "GET", "/api/income", { branch_id: BR2 });
+  await step("income:filter month", "GET", "/api/income", { month: "2026-09" });
+  await step("income:search", "GET", "/api/income", { q: "momo" });
+  await step("income:delete 404", "DELETE", "/api/income/999999");
+
   // analytics & budget
   await step("analytics:6mo", "GET", "/api/analytics", { n: 6 });
   await step("analytics:branch", "GET", "/api/analytics", { n: 6, branch_id: BR2 });
@@ -365,9 +401,85 @@ async function scenario(call) {
   await step("err:unknown route", "GET", "/api/nope");
 
   await step("purchase:delete", "DELETE", `/api/purchases/${pLast.body.id}`);
+  await step("income:delete", "DELETE", `/api/income/${inc1.body.id}`);
   await step("purchases:final", "GET", "/api/purchases", { page: 1, page_size: 50 });
+  await step("income:final", "GET", "/api/income", { page: 1, page_size: 50 });
   await step("analytics:final", "GET", "/api/analytics", { n: 6 });
   await step("meta:final", "GET", "/api/meta");
+
+  /* ---- AI extraction layer (proposal only — nothing is written) ----
+     These must match byte-for-byte too: a keyless server.py and the offline
+     engine run the same heuristics, and the audit clears AI_API_KEY so the
+     model path can never mask a divergence. */
+  await step("ai:extract empty", "POST", "/api/ai/extract", {}, {});
+  await step("ai:extract image w/o provider", "POST", "/api/ai/extract", {},
+    { image: "aGVsbG8=" });
+  await step("ai:extract receipt", "POST", "/api/ai/extract", {}, {
+    text: "Ceda Industrial Supplies\n2026-09-22\nDTF Powder 200 bag 21600\nCredit",
+  });
+  await step("ai:extract sparse", "POST", "/api/ai/extract", {},
+    { text: "DTF Powder 200 bag 21600" });
+  await step("ai:extract ledger page", "POST", "/api/ai/extract", {}, {
+    text: [
+      "Alpha Inks Ltd", "12/09/2026", "Ink Set 10 set 9000",
+      "Foil 4 pack 1200", "Total 10200", "Mobile Money",
+      "restock for the week",
+    ].join("\n"),
+  });
+  await step("ai:extract multi-line no total", "POST", "/api/ai/extract", {}, {
+    text: "2026-09-01\nVinyl Roll 3 roll 1000\nDTF Powder 2 bag 500",
+  });
+  await step("ai:extract fractional", "POST", "/api/ai/extract", {},
+    { text: "Ceda\nDTF Powder 2.5 bag 271.75\nCash" });
+
+  await step("ai:instruct no draft", "POST", "/api/ai/instruct", {}, {
+    instruction: "set the distributor to Ceda",
+  });
+  await step("ai:instruct empty", "POST", "/api/ai/instruct", {},
+    { draft: { distributor: "" }, instruction: "" });
+  await step("ai:instruct set distributor", "POST", "/api/ai/instruct", {},
+    { draft: { distributor: "" }, instruction: "set the distributor to Ceda Industrial Supplies" });
+  await step("ai:instruct bare supplier", "POST", "/api/ai/instruct", {},
+    { draft: { distributor: "" }, instruction: "supplier: Alpha Inks Ltd" });
+  await step("ai:instruct date dmy", "POST", "/api/ai/instruct", {},
+    { draft: { date: "" }, instruction: "change the date to 22/09/2026" });
+  await step("ai:instruct bad date", "POST", "/api/ai/instruct", {},
+    { draft: { date: "" }, instruction: "set the date to sometime soon" });
+  await step("ai:instruct payment alias", "POST", "/api/ai/instruct", {},
+    { draft: { payment_method: "Cash" }, instruction: "make it mobile money" });
+  await step("ai:instruct bad payment", "POST", "/api/ai/instruct", {},
+    { draft: { payment_method: "Cash" }, instruction: "payment method: Bitcoin" });
+  await step("ai:instruct amount", "POST", "/api/ai/instruct", {},
+    { draft: {}, instruction: "change the amount to 4500" });
+  await step("ai:instruct bad amount", "POST", "/api/ai/instruct", {},
+    { draft: {}, instruction: "amount: -5" });
+  await step("ai:instruct unknown instruction", "POST", "/api/ai/instruct", {},
+    { draft: {}, instruction: "blue is a nice colour" });
+
+  await step("ai:statement empty", "POST", "/api/ai/statement", {}, {});
+  await step("ai:statement image w/o provider", "POST", "/api/ai/statement", {},
+    { image: "aGVsbG8=" });
+  await step("ai:statement csv", "POST", "/api/ai/statement", {}, {
+    text: [
+      "Date,Description,Debit,Credit,Reference",
+      "2026-09-22,Ceda Industrial Supplies,21600,,MM9911",
+      "2026-09-23,Shop takings,,5400,MM9912",
+      "2026-09-25,\"Alpha Inks, Ltd\",10200,,CHQ7",
+    ].join("\n"),
+  });
+  await step("ai:statement headerless", "POST", "/api/ai/statement", {}, {
+    text: [
+      "2026-09-22 Payment to Ceda 21600",
+      "2026-09-23 Received 5400 ref 887711",
+      "INV-0045 Alpha Inks 10200 24/09/2026",
+    ].join("\n"),
+  });
+  await step("ai:statement semicolon", "POST", "/api/ai/statement", {}, {
+    text: "date;description;amount\n2026-09-30;Foil purchase;-1200",
+  });
+  await step("ai:statement no rows", "POST", "/api/ai/statement", {},
+    { text: "nothing useful here" });
+  await step("ai:unknown route", "POST", "/api/ai/nope", {}, {});
 
   return log;
 }
@@ -476,6 +588,70 @@ function invariants(log, name) {
 }
 
 /* ======================================================================
+   4. recorded-fixture replay — fixtures/ai is the "recorded-fixture mock"
+   from docs/AI_AUTOMATION_PLAN.md: it lets the model path be exercised
+   (and later regression-tested) without a provider key.
+   ====================================================================== */
+const FIXTURE_TEXT = "Ceda supplied 2 bags of powder for 21600 on 22/09/2026";
+
+async function auditFixtures() {
+  const fxDir = path.join(REPO, "fixtures", "ai");
+  if (!fs.existsSync(fxDir) || !fs.readdirSync(fxDir).some((f) => f.endsWith(".json"))) {
+    ok("fixtures/ai holds at least one recording", false, `missing or empty: ${fxDir}`);
+    return;
+  }
+  let c = null;
+  try {
+    tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "pwbudget-fx-"));
+    const port = await freePort();
+    const base = `http://127.0.0.1:${port}`;
+    c = spawn("python", [path.join(REPO, "server.py"), String(port)],
+      {
+        cwd: REPO,
+        env: { ...process.env, PWBUDGET_DATA_DIR: tmpDir2, AI_API_KEY: "",
+               AI_FIXTURES: fxDir },
+        stdio: "ignore",
+      });
+    await waitForHealth(base, c);
+    const call = serverCall(base);
+
+    const rec = await call("POST", "/api/ai/extract", {}, { text: FIXTURE_TEXT });
+    ok("recorded request replays as source=fixture",
+      rec.body.source === "fixture", JSON.stringify(rec.body));
+
+    const d = rec.body.draft || {};
+    ok("replay returns the recording, not the heuristic's blank draft",
+      d.distributor === "Ceda Industrial Supplies" &&
+      Array.isArray(d.items) && d.items.length === 1 &&
+      d.items[0].total_amount === 21600 && d.payment_method === "Cash",
+      JSON.stringify(rec.body));
+
+    // Same request, no fixture -> must be indistinguishable from offline.
+    const unknown = await call("POST", "/api/ai/extract", {}, { text: "zzz not recorded" });
+    ok("unrecorded request falls back to the heuristic",
+      unknown.body.source === "heuristic", JSON.stringify(unknown.body));
+
+    // An image with a fixtures dir configured but nothing recorded for it:
+    // no key, so no model -> a clear 400 rather than a blank draft.
+    const img = await call("POST", "/api/ai/extract", {}, { image: "AAAA" });
+    ok("image with no recording stays a 400",
+      img.status === 400 && img.body.error ===
+        "could not read that image \u2014 paste the text instead",
+      JSON.stringify(img));
+
+    const nothing = await call("POST", "/api/ai/statement", {}, {});
+    ok("fixture server refuses an empty body exactly as offline does",
+      nothing.status === 400 && nothing.body.error ===
+        "nothing to read \u2014 provide text or an image",
+      JSON.stringify(nothing));
+  } catch (e) {
+    ok("fixture replay harness ran", false, e.message);
+  } finally {
+    if (c) { try { c.kill(); } catch (e) { /* already gone */ } }
+  }
+}
+
+/* ======================================================================
    main
    ====================================================================== */
 (async function main() {
@@ -488,7 +664,14 @@ function invariants(log, name) {
 
     child = spawn("python",
       [path.join(REPO, "server.py"), String(port)],
-      { cwd: REPO, env: { ...process.env, PWBUDGET_DATA_DIR: tmpDir }, stdio: "ignore" });
+      {
+        cwd: REPO,
+        // AI_API_KEY is cleared on purpose: with a key the server would call a
+        // model and the two engines would legitimately differ. Parity means
+        // "the same numbers online and offline", which is the keyless case.
+        env: { ...process.env, PWBUDGET_DATA_DIR: tmpDir, AI_API_KEY: "" },
+        stdio: "ignore",
+      });
     await waitForHealth(base, child);
 
     const C = loadCalculator();
@@ -531,6 +714,34 @@ function invariants(log, name) {
     invariants(srv, "server");
     console.log(`  ${fail - before} failure(s)`);
 
+    console.log("\n== 4. recorded-fixture replay ==");
+    await auditFixtures();
+
+    console.log("\n== 5. shared model contract (server.py vs db.js) ==");
+    // The two engines must ask the model in exactly the same words, or the
+    // same note would yield different drafts online and offline. Each is a
+    // single-line string literal in both files, so comparing the literal text
+    // is exact — and avoids evaluating source.
+    const CONTRACT = ["AI_SYSTEM", "AI_PROMPT_IMAGE", "AI_PROMPT_TEXT_PREFIX",
+                      "AI_PROMPT_INSTRUCT", "AI_PROMPT_STATEMENT_IMAGE",
+                      "AI_PROMPT_STATEMENT_TEXT_PREFIX",
+                      "AI_IMAGE_ERROR", "AI_NOTHING_ERROR", "AI_READ_ERROR"];
+    const grab = (src, name) => {
+      const re = new RegExp("^\\s*(?:const\\s+)?" + name + "\\s*=\\s*(\".*\")\\s*;?\\s*$", "m");
+      const m = re.exec(src);
+      return m ? m[1] : null;
+    };
+    const pySrc = fs.readFileSync(path.join(REPO, "server.py"), "utf8");
+    const jsSrc = fs.readFileSync(path.join(REPO, "public", "app", "db.js"), "utf8");
+    for (const name of CONTRACT) {
+      const a = grab(pySrc, name), b = grab(jsSrc, name);
+      ok(`shared constant ${name} is byte-identical in both engines`,
+         !!a && a === b,
+         a && b ? `server.py ${a}\n     db.js     ${b}`
+                : `missing (server.py=${a ? "yes" : "no"}, db.js=${b ? "yes" : "no"})`);
+    }
+    console.log(`  ${CONTRACT.length} shared constant(s) compared`);
+
     console.log(`\n==== ${pass} passed, ${fail} failed (${((Date.now() - started) / 1000).toFixed(1)}s) ====`);
     if (bad.length) { console.log("\nFAILURES:"); bad.forEach((b) => console.log(b)); }
     process.exitCode = fail ? 1 : 0;
@@ -540,5 +751,6 @@ function invariants(log, name) {
   } finally {
     if (child) { try { child.kill(); } catch (e) { /* already gone */ } }
     if (tmpDir) { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) { /* best effort */ } }
+    if (tmpDir2) { try { fs.rmSync(tmpDir2, { recursive: true, force: true }); } catch (e) { /* best effort */ } }
   }
 })();

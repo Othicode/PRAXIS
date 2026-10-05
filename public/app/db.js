@@ -63,8 +63,14 @@ function load() {
       seq: 1, version: 1,
       branches: [{ id: 1, name: "Main Shop" }],
       distributors: [], products: [], purchases: [],
-      credit_payments: [], budgets: [], created: todayISO(),
+      income: [], credit_payments: [], budgets: [], created: todayISO(),
     };
+    save();
+  }
+  // Devices installed before money-in shipped arrive without the key, and
+  // every income read would then see `undefined`. Backfill once.
+  if (!Array.isArray(DB.income)) {
+    DB.income = [];
     save();
   }
   return DB;
@@ -182,6 +188,38 @@ function purchasesQuery(params) {
   return { rows: out, total, page, pages, page_size: pageSize };
 }
 
+/* Money in — same envelope as purchasesQuery so every pager, filter and
+   parity step can treat the two alike. */
+function incomeQuery(params) {
+  const P = (k) => (params[k] !== undefined && params[k] !== null ? String(params[k]) : "");
+  let rows = (DB.income || []).slice();
+  if (P("branch_id")) rows = rows.filter((r) => r.branch_id === toInt(P("branch_id")));
+  if (P("month")) rows = rows.filter((r) => r.date.startsWith(P("month") + "-"));
+  if (P("frm")) rows = rows.filter((r) => r.date >= P("frm"));
+  if (P("to")) rows = rows.filter((r) => r.date <= P("to"));
+  if (P("q")) {
+    const q = P("q").toLowerCase();
+    rows = rows.filter((r) => [r.source, r.reference, r.memo]
+      .some((v) => String(v || "").toLowerCase().includes(q)));
+  }
+  const total = rows.length;
+  const page = Math.max(1, toInt(P("page"), 1));
+  const pageSize = Math.min(200, Math.max(1, toInt(P("page_size"), 25)));
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const pageRows = rows
+    .sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id)
+    .slice((page - 1) * pageSize, page * pageSize);
+  const out = pageRows.map((r) => {
+    const branch = DB.branches.find((b) => b.id === r.branch_id);
+    return {
+      id: r.id, date: r.date, branch_id: r.branch_id,
+      branch: branch ? branch.name : "", source: r.source,
+      reference: r.reference, amount: r.amount, memo: r.memo,
+    };
+  });
+  return { rows: out, total, page, pages, page_size: pageSize };
+}
+
 function analytics(branchId, months) {
   const today = new Date();
   const ml = monthList(today.getFullYear(), today.getMonth() + 1, months);
@@ -221,12 +259,24 @@ function analytics(branchId, months) {
     if (p.payment_method === "Credit") g.credit_new += p.total_amount;
     monthlyMap[ym] = g;
   }
+  // money in over the same window, so spend and takings sit side by side
+  const incomeMap = {};
+  let totalIncome = 0;
+  for (const r of (DB.income || [])) {
+    if (r.date < first) continue;
+    if (branchId != null && r.branch_id !== branchId) continue;
+    const ym = r.date.slice(0, 7);
+    incomeMap[ym] = (incomeMap[ym] || 0) + r.amount;
+    totalIncome += r.amount;
+  }
+
   const series = ml.map(([y, m]) => {
     const ym = `${y}-${pad2(m)}`;
     const g = monthlyMap[ym] || {};
     return {
       month: ym,
-      spend: r2(g.spend || 0), buys: g.buys || 0, credit_new: r2(g.credit_new || 0),
+      spend: r2(g.spend || 0), income: r2(incomeMap[ym] || 0),
+      buys: g.buys || 0, credit_new: r2(g.credit_new || 0),
     };
   });
 
@@ -277,6 +327,8 @@ function analytics(branchId, months) {
     unit_trend: unitTrend,
     totals: {
       spend: r2(totalSpend),
+      income: r2(totalIncome),
+      net: r2(totalIncome - totalSpend),
       buys: byItem.reduce((s, x) => s + x.buys, 0),
       items: byItem.length,
       distributors: byDist.length,
@@ -377,8 +429,9 @@ function metaData() {
       .sort((a, b) => a.name.localeCompare(b.name)).map((p) => ({ id: p.id, name: p.name })),
     payment_methods: PAYMENT_METHODS,
     units: UNIT_SUGGESTIONS,
-    months: DB.purchases.map((p) => p.date.slice(0, 7))
-      .filter((v, i, a) => a.indexOf(v) === i).sort().reverse(),
+    months: [...new Set(
+      DB.purchases.concat(DB.income || []).map((r) => r.date.slice(0, 7)),
+    )].sort().reverse(),
   };
 }
 
@@ -438,6 +491,558 @@ function createPurchase(payload) {
   save();
   const cs = pm === "Credit" ? creditStats({ purchase_id: id })[0] : null;
   return { status: 201, body: { ok: true, id, credit: cs } };
+}
+
+/* Money in. Validated in the same order as createPurchase — date, branch,
+   the number, then the name — so both engines reject in step. */
+function createIncome(payload) {
+  const rawDate = String(payload.date || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(rawDate))
+    return { status: 400, body: { error: "date must be YYYY-MM-DD" } };
+  const bid = toInt(payload.branch_id);
+  if (!bid || !DB.branches.some((b) => b.id === bid))
+    return { status: 400, body: { error: "a valid branch_id is required" } };
+  const amount = toFloat(payload.amount);
+  if (amount <= 0)
+    return { status: 400, body: { error: "amount must be greater than zero" } };
+  const source = String(payload.source || "").trim().slice(0, 80);
+  if (!source)
+    return { status: 400, body: { error: "source is required" } };
+  const id = nextId();
+  DB.income.push({
+    id, date: rawDate, branch_id: bid, source, amount,
+    reference: String(payload.reference || "").trim().slice(0, 40),
+    memo: String(payload.memo || "").trim().slice(0, 140),
+    created_at: todayISO(),
+  });
+  save();
+  return { status: 201, body: { ok: true, id } };
+}
+
+/* ==========================================================================
+   AI extraction layer — phase 1 plumbing (docs/AI_AUTOMATION_PLAN.md)
+
+   This is the offline half of /api/ai/*. There is no model here: an installed
+   phone may have no internet at all, so every route runs the same
+   deterministic heuristic a *keyless* server.py runs. The plan calls this
+   "fixture-first" — the fixtures exist to test the model path, but the
+   shapes a keyless server produces and the shapes produced here must be
+   identical, or audit_calculations.js parity breaks.
+
+   Governing rule: this layer only proposes. A human confirms, and the
+   ordinary createPurchase() path records.
+   ========================================================================== */
+
+const AI_IMAGE_ERROR = "image extraction needs an AI provider \u2014 paste the text instead";
+const AI_NOTHING_ERROR = "nothing to read \u2014 provide text or an image";
+const AI_READ_ERROR = "could not read that image \u2014 paste the text instead";
+
+/* The model contract — byte-identical to server.py's AI_SYSTEM / AI_PROMPT_*
+   constants. audit_calculations.js compares the source literals, because the
+   server path (env key) and this device path (key from Settings) must ask the
+   model for the same thing or the two engines drift. */
+const AI_SYSTEM = "You extract bookkeeping records from receipts, ledger pages and bank statements. Answer with one JSON object only \u2014 no prose, no markdown. Never invent a figure you cannot read: leave it empty and list it under \"uncertain\" as {field, why, options[]}.";
+const AI_PROMPT_IMAGE = "Read this bookkeeping image and return the purchase draft as JSON: {\"date\":\"YYYY-MM-DD\",\"distributor\":\"\",\"items\":[{\"product\":\"\",\"unit\":\"\",\"quantity\":0,\"total_amount\":0}],\"payment_method\":\"\",\"memo\":\"\"} plus \"uncertain\":[{field,why,options[]}].";
+const AI_PROMPT_TEXT_PREFIX = "Turn this note into a purchase draft JSON: {\"date\":\"\",\"distributor\":\"\",\"items\":[{\"product\":\"\",\"unit\":\"\",\"quantity\":0,\"total_amount\":0}],\"payment_method\":\"\",\"memo\":\"\"} plus \"uncertain\":[{field,why,options[]}]. Note:\n";
+const AI_PROMPT_INSTRUCT = "Apply this edit to the bookkeeping draft and return only {\"op\":\"update\",\"changes\":{...}} with an empty changes object if the instruction does not name a field. Whitelisted fields: ";
+const AI_PROMPT_STATEMENT_IMAGE = "Read this statement image and return JSON {\"candidates\":[{\"date\":\"YYYY-MM-DD\",\"direction\":\"out|in\",\"amount\":0,\"description\":\"\",\"reference\":\"\"}],\"uncertain\":[{field,why,options[]}]}.";
+const AI_PROMPT_STATEMENT_TEXT_PREFIX = "Read this statement text and return JSON {\"candidates\":[{\"date\":\"YYYY-MM-DD\",\"direction\":\"out|in\",\"amount\":0,\"description\":\"\",\"reference\":\"\"}],\"uncertain\":[{field,why,options[]}]}.\n";
+
+/* The device-supplied model connection. This is the offline engine's counterpart
+   of server.py's AI_API_KEY / AI_BASE_URL / AI_MODEL: the owner picks a provider
+   and pastes a key in Settings, it is stored on this device only, and it travels
+   nowhere except straight to that provider. Null means "no model here" — the
+   routes then answer exactly like a keyless server.py. */
+let AI_PROVIDER = null;
+
+function setProvider(cfg) {
+  const key = cfg && cfg.key ? String(cfg.key).trim() : "";
+  const baseUrl = cfg && cfg.baseUrl ? String(cfg.baseUrl).trim().replace(/\/+$/, "") : "";
+  AI_PROVIDER = key && baseUrl
+    ? { baseUrl, key, model: String((cfg && cfg.model) || "").trim() }
+    : null;
+}
+
+function providerSet() { return AI_PROVIDER !== null; }
+
+/* One chat completion. Returns the model's text, or null on any failure — an
+   unreachable model must never break a core path (mirrors server.py _ai_chat). */
+async function aiChat(prompt, image) {
+  const cfg = AI_PROVIDER;
+  if (!cfg) return null;
+  const content = [{ type: "text", text: prompt }];
+  if (image) {
+    const raw = String(image);
+    content.push({
+      type: "image_url",
+      image_url: { url: raw.startsWith("data:") ? raw : `data:image/jpeg;base64,${raw}` },
+    });
+  }
+  let data;
+  try {
+    const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.key}` },
+      body: JSON.stringify({
+        model: cfg.model, temperature: 0,
+        messages: [{ role: "system", content: AI_SYSTEM }, { role: "user", content }],
+      }),
+    });
+    if (!res.ok) return null;
+    data = await res.json();
+  } catch (e) {
+    return null;   // CORS, offline, DNS — fall back to the heuristic
+  }
+  const choice = data && Array.isArray(data.choices) ? data.choices[0] : null;
+  const raw = choice && choice.message ? String(choice.message.content || "") : "";
+  let text = raw.trim();
+  if (!text) return null;
+  text = text.replace(/^```[A-Za-z]*\s*/, "").replace(/\s*```$/, "");
+  return text;
+}
+
+/* fixture-free device equivalent of server.py's ai_call: model -> parsed JSON,
+   or null so the caller falls back to the heuristic. */
+async function aiCall(kind, payload, prompt) {
+  const text = await aiChat(prompt, payload && payload.image);
+  if (!text) return null;
+  try { return JSON.parse(text); } catch (e) { return null; }
+}
+
+// Mirrors PAYMENT_HINTS in server.py — first keyword hit wins.
+const PAYMENT_HINTS = [
+  ["Mobile Money", ["mobile money", "momo", "telecel", "airteltigo", "mtn momo"]],
+  ["Bank Transfer", ["bank transfer", "bank", "transfer", "ghipss", "cheque", "check"]],
+  ["Credit", ["credit", "on credit", "owed"]],
+  ["Cash", ["cash"]],
+];
+
+const ISO_DATE_RE = /\b(\d{4})-(\d{1,2})-(\d{1,2})\b/;
+const SLASH_DATE_RE = /\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b/;
+// Python's re.sub replaces every match even without re.I/g, while JS
+// String.replace on a non-global regex stops after the first — these globals
+// are what keep rowNumbers() and the description scrub identical.
+const ISO_DATE_G = new RegExp(ISO_DATE_RE.source, "g");
+const SLASH_DATE_G = new RegExp(SLASH_DATE_RE.source, "g");
+const WHOLE_DATE_RE = /^\s*(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\s*$/;
+const NUM_SRC = "\\d+(?:\\.\\d+)?";
+const ITEM_4 = new RegExp(`^(.+?)\\s+(${NUM_SRC})\\s+([A-Za-z]+)\\s+(${NUM_SRC})$`);
+const ITEM_3 = new RegExp(`^(.+?)\\s+(${NUM_SRC})\\s+(${NUM_SRC})$`);
+const TOTAL_RE = new RegExp(`^(?:total|grand total|subtotal|amount paid|paid)\\D*?(${NUM_SRC})\\s*$`, "i");
+const STRICT_NUM_RE = new RegExp(`^-?${NUM_SRC}$`);
+
+const INSTR_FIELDS = "distributor|supplier|vendor|date|payment(?:\\s+method)?|method|memo|note|product|item|unit|quantity|qty|amount|total";
+const INSTR_SET_RE = new RegExp(
+  `^\\s*(?:set|change|make|update|put|switch)\\s+(?:the\\s+)?(${INSTR_FIELDS})\\s*(?:to|=|:|as)\\s*(.+)$`, "i");
+const INSTR_BARE_RE = new RegExp(`^\\s*(${INSTR_FIELDS})\\s*(?:is|=|:)\\s*(.+)$`, "i");
+
+const FIELD_ALIASES = {
+  distributor: "distributor", supplier: "distributor", vendor: "distributor",
+  date: "date",
+  payment: "payment_method", "payment method": "payment_method", method: "payment_method",
+  memo: "memo", note: "memo",
+  product: "product", item: "product",
+  unit: "unit",
+  quantity: "quantity", qty: "quantity",
+  amount: "total_amount", total: "total_amount",
+};
+const NUMERIC_FIELDS = ["quantity", "total_amount"];
+const TEXT_LIMITS = { distributor: 80, product: 80, unit: 20, memo: 140 };
+
+const HEADER_MAP = {
+  date: "date", "transaction date": "date", "value date": "date", "posting date": "date",
+  description: "description", details: "description", narration: "description",
+  particulars: "description", name: "description",
+  amount: "amount", debit: "debit", withdrawal: "debit", dr: "debit",
+  credit: "credit", deposit: "credit", cr: "credit",
+  balance: "balance",
+  reference: "reference", ref: "reference", "reference no": "reference",
+  "transaction id": "reference", "transaction id": "reference",
+  "transaction reference": "reference",
+};
+
+const hasLetter = (s) => /[A-Za-z]/.test(s);
+
+function findDate(text) {
+  const src = String(text || "");
+  let m = ISO_DATE_RE.exec(src);
+  if (m) {
+    const y = +m[1], mo = +m[2], d = +m[3];
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31)
+      return `${String(y).padStart(4, "0")}-${pad2(mo)}-${pad2(d)}`;
+  }
+  m = SLASH_DATE_RE.exec(src);
+  if (m) {
+    const a = +m[1], b = +m[2], c = +m[3];
+    const y = c < 100 ? c + 2000 : c;
+    let day, mon;
+    if (a > 12 && b <= 12) { day = a; mon = b; }
+    else if (b > 12 && a <= 12) { day = b; mon = a; }
+    else { day = a; mon = b; }
+    if (mon >= 1 && mon <= 12 && day >= 1 && day <= 31)
+      return `${String(y).padStart(4, "0")}-${pad2(mon)}-${pad2(day)}`;
+  }
+  return "";
+}
+
+function findPayment(text) {
+  const low = String(text || "").toLowerCase();
+  for (const [name, keys] of PAYMENT_HINTS)
+    for (const k of keys) if (low.includes(k)) return name;
+  return "";
+}
+
+function draftUncertain(draft, totalLine) {
+  const items = (draft && draft.items) || [];
+  const out = [];
+  if (totalLine != null && items.length > 1) {
+    out.push({
+      field: "total_amount",
+      why: "the total does not match the line items",
+      options: [
+        r2(items.reduce((s, i) => s + (Number(i.total_amount) || 0), 0)),
+        r2(totalLine),
+      ],
+    });
+  }
+  if (!draft.date) out.push({ field: "date", why: "no date found", options: [] });
+  if (!draft.distributor) out.push({ field: "distributor", why: "no supplier name found", options: [] });
+  if (!draft.payment_method)
+    out.push({ field: "payment_method", why: "no payment method found", options: ["Cash", "Credit"] });
+  if (!items.length) out.push({ field: "items", why: "no item lines matched", options: [] });
+  items.forEach((it, i) => {
+    if (!it.unit)
+      out.push({ field: `items[${i}].unit`, why: "unit not readable", options: UNIT_SUGGESTIONS.slice(0, 6) });
+    if (!(Number(it.quantity) > 0))
+      out.push({ field: `items[${i}].quantity`, why: "quantity not readable", options: [] });
+    if (!(Number(it.total_amount) > 0))
+      out.push({ field: `items[${i}].total_amount`, why: "amount not readable", options: [] });
+  });
+  return out;
+}
+
+function extractDraft(text) {
+  const draft = { date: "", distributor: "", items: [], payment_method: "", memo: "" };
+  let totalLine = null;
+  const memos = [];
+
+  for (const raw of String(text || "").split(/\r\n|\r|\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (WHOLE_DATE_RE.test(line)) {
+      if (!draft.date) draft.date = findDate(line);
+      continue;
+    }
+    let m = ITEM_4.exec(line);
+    if (m) {
+      draft.items.push({
+        product: m[1].trim().slice(0, 80),
+        quantity: toFloat(m[2]),
+        unit: m[3].slice(0, 20),
+        total_amount: toFloat(m[4]),
+      });
+      continue;
+    }
+    m = ITEM_3.exec(line);
+    if (m) {
+      draft.items.push({
+        product: m[1].trim().slice(0, 80),
+        quantity: toFloat(m[2]),
+        unit: "",
+        total_amount: toFloat(m[3]),
+      });
+      continue;
+    }
+    m = TOTAL_RE.exec(line);
+    if (m) { totalLine = toFloat(m[1]); continue; }
+    const pm = findPayment(line);
+    // ASCII \d, matching the explicit range check in server.py.
+    if (pm && !/[0-9]/.test(line)) { draft.payment_method = pm; continue; }
+    const d = findDate(line);
+    if (d) {
+      if (!draft.date) draft.date = d;
+      continue;
+    }
+    if (!draft.distributor && hasLetter(line)) { draft.distributor = line.slice(0, 80); continue; }
+    if (hasLetter(line)) memos.push(line.slice(0, 140));
+  }
+
+  // A receipt's printed total is authoritative when there is a single line.
+  if (totalLine != null && draft.items.length === 1)
+    draft.items[0].total_amount = totalLine;
+
+  if (memos.length) draft.memo = memos.join("; ").slice(0, 140);
+  return [draft, draftUncertain(draft, totalLine)];
+}
+
+function normaliseDraft(obj) {
+  const src = (obj && typeof obj === "object") ? obj : {};
+  const raw = Array.isArray(src.items) ? src.items : [];
+  const items = [];
+  for (const it of raw.slice(0, 50)) {
+    if (!it || typeof it !== "object") continue;
+    items.push({
+      product: String(it.product || "").trim().slice(0, 80),
+      unit: String(it.unit || "").trim().slice(0, 20),
+      quantity: toFloat(it.quantity),
+      total_amount: toFloat(it.total_amount),
+    });
+  }
+  const pm = String(src.payment_method || "").trim();
+  return {
+    date: findDate(String(src.date || "")) || "",
+    distributor: String(src.distributor || "").trim().slice(0, 80),
+    items,
+    payment_method: PAYMENT_METHODS.includes(pm) ? pm : "",
+    memo: String(src.memo || "").trim().slice(0, 140),
+  };
+}
+
+function validateChange(field, value) {
+  const raw = String(value == null ? "" : value).trim();
+  if (field === "date") {
+    const d = findDate(raw);
+    return d ? [true, d] : [false, "date must be YYYY-MM-DD"];
+  }
+  if (field === "payment_method") {
+    for (const pm of PAYMENT_METHODS)
+      if (pm.toLowerCase() === raw.toLowerCase()) return [true, pm];
+    const hit = findPayment(raw);
+    if (hit) return [true, hit];
+    return [false, `payment_method must be one of: ${PAYMENT_METHODS.join(", ")}`];
+  }
+  if (NUMERIC_FIELDS.includes(field)) {
+    const num = raw.replace(/,/g, "");
+    if (!STRICT_NUM_RE.test(num) || !(parseFloat(num) > 0))
+      return [false, `${field} must be a positive number`];
+    return [true, r2(parseFloat(num))];
+  }
+  const limit = TEXT_LIMITS[field] != null ? TEXT_LIMITS[field] : 80;
+  if (!raw) return [false, `${field} is required`];
+  return [true, raw.slice(0, limit)];
+}
+
+function applyPatch(changes) {
+  const clean = {};
+  if (changes && typeof changes === "object") {
+    for (const [field, value] of Object.entries(changes)) {
+      const name = FIELD_ALIASES[String(field).trim().toLowerCase()];
+      if (!name) continue;
+      const [flag, out] = validateChange(name, value);
+      if (flag) clean[name] = out;
+    }
+  }
+  if (!Object.keys(clean).length) return { op: "none", changes: {} };
+  return { op: "update", target: "purchase_draft", changes: clean };
+}
+
+async function aiExtract(payload) {
+  const text = String((payload && payload.text) || "");
+  const image = String((payload && payload.image) || "");
+  if (!text.trim() && !image) return [400, { error: AI_NOTHING_ERROR }];
+
+  if (image && !text.trim()) {
+    // Only a model can read pixels; a heuristic on an empty string would
+    // quietly hand back a blank draft. With no key on this device the
+    // refusal is byte-identical to a keyless server.py's.
+    if (!providerSet()) return [400, { error: AI_IMAGE_ERROR }];
+    const got = await aiCall("extract", { image }, AI_PROMPT_IMAGE);
+    if (got === null) return [400, { error: AI_READ_ERROR }];
+    const draft = normaliseDraft(got);
+    return [200, { ok: true, draft, uncertain: draftUncertain(draft), source: "model" }];
+  }
+
+  if (providerSet()) {
+    // `context` is the owner's scope at work: names and figures they have
+    // allowed the model to see. Absent or empty it changes nothing.
+    const ctx = String((payload && payload.context) || "").trim();
+    const fixture = { text };
+    if (ctx) fixture.context = ctx;
+    const got = await aiCall("extract", fixture,
+      AI_PROMPT_TEXT_PREFIX + (ctx ? ctx + "\n" : "") + text);
+    if (got !== null) {
+      const draft = normaliseDraft(got);
+      const uncertain = Array.isArray(got.uncertain) ? got.uncertain : [];
+      return [200, { ok: true, draft, uncertain, source: "model" }];
+    }
+  }
+
+  const [draft, uncertain] = extractDraft(text);
+  return [200, { ok: true, draft, uncertain, source: "heuristic" }];
+}
+
+async function aiInstruct(payload) {
+  const draft = payload && payload.draft;
+  if (!draft || typeof draft !== "object" || Array.isArray(draft))
+    return [400, { error: "draft is required" }];
+  const instruction = String(payload.instruction || "").trim();
+  if (!instruction) return [400, { error: "instruction is required" }];
+
+  if (providerSet()) {
+    const fields = [...new Set(Object.values(FIELD_ALIASES))].sort().join(", ");
+    const got = await aiCall("instruct", { draft, instruction },
+      AI_PROMPT_INSTRUCT + fields + ".\nDraft: " + JSON.stringify(draft) +
+      "\nInstruction: " + instruction);
+    if (got !== null) {
+      // the same whitelist runs over a model's answer as over a person's
+      const changes = got && typeof got === "object" && !Array.isArray(got)
+        ? got.changes : null;
+      return [200, { ok: true, patch: applyPatch(changes), source: "model" }];
+    }
+  }
+
+  const m = INSTR_SET_RE.exec(instruction) || INSTR_BARE_RE.exec(instruction);
+  if (!m) return [200, { ok: true, patch: { op: "none", changes: {} }, source: "heuristic" }];
+  const field = FIELD_ALIASES[m[1].trim().toLowerCase()];
+  const [flag, value] = validateChange(field, m[2]);
+  if (!flag) return [400, { error: value }];
+  return [200, { ok: true, source: "heuristic",
+                 patch: { op: "update", target: "purchase_draft", changes: { [field]: value } } }];
+}
+
+function splitRow(line, delim) {
+  const cells = [];
+  let cur = "", quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (quoted && i + 1 < line.length && line[i + 1] === '"') { cur += '"'; i++; continue; }
+      quoted = !quoted;
+      continue;
+    }
+    if (ch === delim && !quoted) { cells.push(cur.trim()); cur = ""; continue; }
+    cur += ch;
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+const cellAt = (cells, idx) =>
+  (idx == null || idx < 0 || idx >= cells.length) ? "" : cells[idx];
+
+function rowNumbers(text) {
+  let src = String(text || "").replace(ISO_DATE_G, " ");
+  src = src.replace(SLASH_DATE_G, " ");
+  return (src.match(/\d[\d,]*(?:\.\d+)?/g) || []).map((m) => parseFloat(m.replace(/,/g, "")));
+}
+
+function numCell(cells, idx) {
+  if (idx == null) return null;
+  const raw = cellAt(cells, idx).replace(/,/g, "");
+  if (!STRICT_NUM_RE.test(raw)) return null;
+  return parseFloat(raw);
+}
+
+function parseStatement(text) {
+  const lines = String(text || "").split(/\r\n|\r|\n/).filter((l) => l.trim());
+  if (!lines.length) return [[], []];
+  const delim = lines[0].includes("\t") ? "\t" : (lines[0].includes(";") ? ";" : ",");
+  const rows = lines.map((l) => splitRow(l, delim));
+
+  const cols = {};
+  rows[0].forEach((cell, i) => {
+    const key = HEADER_MAP[cell.trim().toLowerCase()];
+    if (key && cols[key] === undefined) cols[key] = i;
+  });
+  const data = Object.keys(cols).length ? rows.slice(1) : rows;
+
+  const candidates = [], uncertain = [];
+  data.forEach((cells, n) => {
+    if (!cells.some((c) => c)) return;
+    const rowText = cells.join(" ");
+    const date = cols.date != null ? findDate(cellAt(cells, cols.date)) : findDate(rowText);
+
+    let amount = null, direction = null;
+    if (cols.debit != null || cols.credit != null) {
+      const dv = numCell(cells, cols.debit);
+      const cv = numCell(cells, cols.credit);
+      if (dv != null && dv > 0) { amount = dv; direction = "out"; }
+      else if (cv != null && cv > 0) { amount = cv; direction = "in"; }
+    }
+    if (amount == null && cols.amount != null) {
+      const av = numCell(cells, cols.amount);
+      if (av != null && av !== 0) { amount = Math.abs(av); direction = av < 0 ? "out" : "in"; }
+    }
+
+    if (amount == null) {
+      const found = rowNumbers(rowText);
+      if (found.length) {
+        amount = Math.abs(found[0]);
+        if (found.length > 1) {
+          uncertain.push({
+            field: `rows[${n}].amount`,
+            why: "more than one number in the row",
+            options: found.slice(0, 4).map((v) => r2(Math.abs(v))),
+          });
+        }
+      }
+    }
+    if (amount == null || amount <= 0) {
+      uncertain.push({ field: `rows[${n}].amount`, why: "amount not readable", options: [] });
+      return;
+    }
+    if (!date) uncertain.push({ field: `rows[${n}].date`, why: "no date found", options: [] });
+
+    let desc = "";
+    if (cols.description != null) {
+      desc = cellAt(cells, cols.description);
+    } else {
+      // No description column: take the first readable cell and drop any date
+      // from it, so "2026-09-22 Payment to Ceda" reads as a name.
+      desc = cells.find((c) => hasLetter(c)) || "";
+      if (desc) desc = desc.replace(ISO_DATE_G, "").replace(SLASH_DATE_G, "").trim();
+    }
+    if (direction == null) {
+      direction = "out";
+      uncertain.push({
+        field: `rows[${n}].direction`,
+        why: "no debit/credit column \u2014 assumed money out",
+        options: ["out", "in"],
+      });
+    }
+
+    candidates.push({
+      date,
+      direction,
+      amount: r2(amount),
+      description: desc.slice(0, 60),
+      reference: cellAt(cells, cols.reference).slice(0, 40),
+    });
+  });
+
+  if (!candidates.length)
+    uncertain.push({ field: "candidates", why: "no transactions found", options: [] });
+  return [candidates, uncertain];
+}
+
+async function aiStatement(payload) {
+  const text = String((payload && payload.text) || "");
+  const image = String((payload && payload.image) || "");
+  if (!text.trim() && !image) return [400, { error: AI_NOTHING_ERROR }];
+
+  if (image && !text.trim()) {
+    // Same refusal as a keyless server.py: pixels need a model.
+    if (!providerSet()) return [400, { error: AI_IMAGE_ERROR }];
+    const got = await aiCall("statement", { image }, AI_PROMPT_STATEMENT_IMAGE);
+    if (got === null) return [400, { error: AI_READ_ERROR }];
+    return [200, statementResult(got, "model")];
+  }
+
+  if (providerSet()) {
+    const got = await aiCall("statement", { text },
+      AI_PROMPT_STATEMENT_TEXT_PREFIX + text);
+    if (got !== null) return [200, statementResult(got, "model")];
+  }
+
+  const [candidates, uncertain] = parseStatement(text);
+  return [200, { ok: true, candidates, uncertain, source: "heuristic" }];
+}
+
+/* Model answers arrive as loose JSON; this is the shape both engines agree on. */
+function statementResult(got, source) {
+  const cand = got && Array.isArray(got.candidates) ? got.candidates : [];
+  const unc = got && Array.isArray(got.uncertain) ? got.uncertain : [];
+  return { ok: true, candidates: cand.slice(0, 200), uncertain: unc, source };
 }
 
 /* ---------------- request dispatcher (mirror server.py _api) ---------------- */
@@ -522,6 +1127,22 @@ function request(method, path, qs, body) {
     return { status: 200, body: { ok: true } };
   }
 
+  // income (money in)
+  if (path === "/api/income" && method === "GET")
+    return { status: 200, body: incomeQuery(qs) };
+  if (path === "/api/income" && method === "POST")
+    return createIncome(body);
+
+  const pm4 = path.match(/^\/api\/income\/(\d+)$/);
+  if (pm4 && method === "DELETE") {
+    const iid = toInt(pm4[1]);
+    const idx = (DB.income || []).findIndex((r) => r.id === iid);
+    if (idx === -1) return { status: 404, body: { error: "income not found" } };
+    DB.income.splice(idx, 1);
+    save();
+    return { status: 200, body: { ok: true } };
+  }
+
   // credits
   if (path === "/api/credits" && method === "GET") {
     const bid = toInt(q("branch_id")) || null;
@@ -581,8 +1202,20 @@ function request(method, path, qs, body) {
     return { status: 200, body: { ok: true, ...budgetView(bid, year, month) } };
   }
 
+  // AI extraction layer — proposal only, never writes. Mirror of the three
+  // /api/ai/* routes in server.py. extract/instruct/statement can use a model
+  // when the owner has pasted a key into Settings (setProvider); otherwise
+  // they answer exactly like a keyless server.py. All three may be
+  // asynchronous, because a model round-trip is, so each hands back a Promise.
+  if (path === "/api/ai/extract" && method === "POST")
+    return aiExtract(body).then((r) => ({ status: r[0], body: r[1] }));
+  if (path === "/api/ai/instruct" && method === "POST")
+    return aiInstruct(body).then((r) => ({ status: r[0], body: r[1] }));
+  if (path === "/api/ai/statement" && method === "POST")
+    return aiStatement(body).then((r) => ({ status: r[0], body: r[1] }));
+
   return { status: 404, body: { error: "not found" } };
 }
 
-const PWDB = { request, load, save, storageKey: LS_KEY };
+const PWDB = { request, load, save, storageKey: LS_KEY, setProvider, providerSet };
 if (typeof globalThis !== "undefined") globalThis.PWDB = PWDB;

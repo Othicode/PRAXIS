@@ -39,12 +39,37 @@ contract, so nothing in the UI changes.
   everything is quiet. The **Credits** tab carries a live count badge.
 - **Purchases** — filter / search / paginate every entry; move entries between
   branches; delete.
+- **📷 Scan a slip** — inside **New purchase**, two ways to type less.
+  *Scan a slip* photographs a receipt or ledger page and pre-fills the date,
+  supplier, item, quantity and amount; *Paste text* does the same from copied
+  text and works with **no internet at all**. Anything it is not sure about
+  comes back as a **⚠ Check these before saving** card — tap an option to
+  answer it, and that question disappears. A slip listing three lines becomes
+  three purchases, each one confirmed and saved through the ordinary form.
+  Nothing is written until **Save purchase** is pressed, and the photo itself
+  is never stored.
+- **🤖 AI status strip** — a one-line bar under the header on **every screen**:
+  `AI · Groq · llama-3.3-70b · capture · catalogue`. Green dot = a model is
+  attached on this device, hollow = built-in rules only, red = it could not
+  reach the model and says so instead of quietly guessing. Tap it to open
+  **AI connection**, which also lists the **coverage** — exactly which parts
+  of the app the model may reach. Turn *Receipt & slip capture* off and the
+  scan bar disappears; turn *My items & suppliers* off and your catalogue
+  stops travelling with a scan.
 - **Credits** — outstanding accounts with balance + %-settled progress and
   payment history; "Pay now" records later payments and recomputes everything.
   Each open credit shows how **old** it is (⏳ 60+ days = overdue) and an
   *Oldest open credit* KPI, so nothing quietly rots.
 - **Analytics** — spend per item, most-bought by quantity, per distributor,
   payment mix, monthly trend, unit-price trends.
+- **Money in** — the other half of the ledger: takings and deposits, with
+  their own list, search, month filter and dialog, a dashboard KPI and a
+  money-in series in the spend chart (so the trend shows **net**, not just
+  spend). Inside it, **statement ingest** takes a pasted text / 📂 CSV /
+  📷 screenshot of a MoMo or bank statement and turns it into tickable
+  candidates — money-in rows record through the ordinary money-in path;
+  money-out rows are shown but never imported (a statement has no product or
+  quantity, so they belong in a purchase).
 - **Budget** — year + month + total + savings target; ⚡ auto-distributes the
   spendable amount across items from purchase history; editable percentages;
   plan vs actual.
@@ -157,6 +182,7 @@ purchases        date, branch, distributor, product, qty + unit, total paid,
                  price + amount paid
 credit_payments  later payments against a credit purchase (drives balance)
 budgets          year + month + total + savings target + item allocations (%)
+income           money in: date, branch, source, reference, amount, memo
 ```
 
 Offline engine (`public/app/db.js`) mirrors this JSON-in-`localStorage`.
@@ -178,7 +204,22 @@ GET  /api/analytics?branch_id=&n=6  item / distributor / monthly / payment-mix s
 GET  /api/budget?year=&month=&branch_id=          current plan or auto-suggestion
 POST /api/budget                    {year, month, branch_id, total_amount, save_amount,
                                      allocations:[{name, percent}]}
+GET  /api/income?[branch_id&month&q&page&page_size]   money in
+POST /api/income                    {date, branch_id, source, reference?, amount, memo?}
+DELETE /api/income/<id>             delete a money-in entry
+
+# AI extraction — proposal only, never writes. Human confirms, then the
+# ordinary /api/purchases path records. See docs/AI_AUTOMATION_PLAN.md.
+POST /api/ai/extract                {text?, image?}  -> {draft, uncertain[], source}
+POST /api/ai/instruct               {draft, instruction} -> {patch, source}
+POST /api/ai/statement              {text?, image?}  -> {candidates[], uncertain[], source}
 ```
+
+`source` is `heuristic` unless `AI_API_KEY` (or a recorded fixture) is
+configured. A per-device key pasted into **AI connection** makes `db.js`
+produce `model` too — still identical to a keyless `server.py`, because the
+parity harness clears the key, so the two engines answer identically. An
+image with no provider is a 400 asking for the text instead.
 
 Example:
 
@@ -192,6 +233,31 @@ curl -X POST http://127.0.0.1:8000/api/purchases -H "Content-Type: application/j
 Server computes unit price (108.00), finds/creates the distributor and product,
 and stashes balance (16,600) and %-cleared (23.1%).
 
+## Connect a free model
+
+Every AI path has a working no-key fallback, so this is optional — but with a
+key the slip reader gets a real model instead of regex rules.
+
+1. Tap the **AI strip** (or *AI settings* in the phone's **More** sheet).
+2. Pick a provider — **Groq**, **Google Gemini** or **OpenRouter** are all
+   free tiers with no credit card; *Custom* takes any OpenAI-compatible
+   `base URL`. **Get a free key ↗** opens the right console.
+3. Paste the key, choose the model (*Test connection* proves the key, endpoint
+   and model all answer, by checking the reply came from a model rather than
+   from the built-in rules), set the coverage, **Save**.
+
+The key is stored in this device's `localStorage` under `pwbudget.ai.v1` and
+is sent to **nothing but the provider you picked** — never to this project's
+server, never to a third party. *Forget* wipes it and the strip goes hollow.
+
+Coverage is yours to set: *Receipt & slip capture*, *My items & suppliers*,
+*Credit you owe* and *App settings* are all live switches, not decoration —
+each one decides whether the corresponding part of the app is part of the
+model's body.
+
+An unreachable model never fails a core path: `db.js` falls back to the same
+deterministic rules a keyless server runs, and the strip turns red to say so.
+
 ## Tests
 
 ```
@@ -200,16 +266,24 @@ node smoke_test.js
 
 Runs the **real** `public/app/app.js` + `public/app/db.js` headlessly in Node
 with a DOM stub, in **both modes** (offline engine + server via fetch). Covers
-every view, cash/credit entry, later payments, budget auto-distribute, branch
-creation + navigation, analytics, and the calculator math. Server smoke data
-is deleted by the harness; run `python tools/cleanup_smoke.py` afterwards if
-anything lingers (it also reports the clean state).
+every view — including **Money in** and its **statement ingest** card (paste /
+CSV / screenshot → candidates → *Record money in*) — cash/credit entry, later
+payments, budget auto-distribute, branch creation + navigation, analytics,
+the calculator math, the capture flow
+(text → extract → review card → each line saved through `/api/purchases`),
+and the AI surface: the status strip, the coverage defaults, the settings
+dialog's provider list, a pasted key installing a device-side connection,
+an unreachable model falling back instead of failing, and *Forget* detaching
+it again.
+Server smoke data is deleted by the harness; run
+`python tools/cleanup_smoke.py` afterwards if anything lingers (it also
+reports the clean state).
 
 ```
 node audit_calculations.js
 ```
 
-Answers *"is the arithmetic actually right?"* in three sections:
+Answers *"is the arithmetic actually right?"* in five sections:
 
 1. **Calculator** — drives the real `calcEval()`/`calcPush()` with ~70
    expressions, simulated key taps and malformed input. Guards against the
@@ -219,15 +293,25 @@ Answers *"is the arithmetic actually right?"* in three sections:
    engine *and* a live `server.py`, then requires matching status codes,
    figures and error strings. Opaque row ids are ignored (the engines ship
    different seed catalogs by design); everything else must match, because a
-   user should see the same numbers online and offline.
+   user should see the same numbers online and offline. This now includes the
+   `/api/ai/*` extraction routes — the spawned server has `AI_API_KEY`
+   cleared, so a live model can never mask a heuristic divergence.
 3. **Invariants** — arithmetic that must hold whatever the engine: credit
    `paid + balance == total`, `qty × unit_price == total`, every analytics
    breakdown summing to its total, `spendable == total - save`, allocation
    percents summing to 100 after 1dp rounding, and the validation rules that
    keep them true.
+4. **Recorded-fixture replay** — a second server started against `fixtures/ai`
+   must answer a recorded request with `source: "fixture"`, an unrecorded one
+   with `source: "heuristic"`, and a bare image with a 400.
+5. **Shared model contract** — the nine constants both engines ask the model
+   with (`AI_SYSTEM`, the capture image + text prompts, the instruct prompt,
+   the two statement prompts and the three AI error strings)
+   must be byte-identical in `server.py` and `public/app/db.js`; otherwise the
+   same slip would yield different drafts online and offline.
 
-Self-contained — it starts its own server on a free port against a throwaway
-data directory, so it never touches your real `ledger.db`. Exit code is
+Self-contained — it starts its own server(s) on free ports against throwaway
+data directories, so it never touches your real `ledger.db`. Exit code is
 non-zero on any failure.
 
 ## Tools / config
@@ -238,6 +322,14 @@ non-zero on any failure.
 - `tools/cleanup_smoke.py` — wipe any leftover smoke-test rows.
 - **Currency** — `CURRENCY` in `server.py` *and* `CURRENCY` in `public/app/db.js`.
 - **Payment methods** — `PAYMENT_METHODS` in both files too.
+- **AI (optional)** — `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL`, `AI_TIMEOUT`,
+  plus `AI_FIXTURES` (replay a recorded response by request digest) and
+  `AI_FIXTURES_RECORD=1` (write them as they land). **No key is required**:
+  every `/api/ai/*` route then runs the same deterministic heuristic `db.js`
+  runs, which is what keeps the engines in parity. A per-device key pasted
+  into **AI connection** is a second, independent source: `db.js` calls the
+  provider straight from the browser, so it works in server mode too and the
+  key never leaves the device.
 - **App data** remains in `ledger.db` for server mode; offline data is in the
   phone's `localStorage` under key `pwbudget.v1`.
 
@@ -247,7 +339,6 @@ The AI / automation direction (features, inference approach, constraints) is
 written down in [`docs/AI_AUTOMATION_PLAN.md`](docs/AI_AUTOMATION_PLAN.md),
 together with a summary of how this codebase is put together.
 
-- Receipt OCR: snap a supplier invoice → distributor, item, amount pre-filled.
 - Low-stock warnings per item (credit age, budget burn and price-spike
   reminders already ship — see Dashboard).
 - CSV export of purchases and credits.

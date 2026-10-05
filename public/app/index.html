@@ -106,6 +106,7 @@ setTimeout(function () {
   <nav class="nav" id="main-nav" aria-label="Sections">
     <button class="nav-btn active" data-view="dashboard"><span class="nav-ico">📊</span><span class="nav-txt">Dashboard</span></button>
     <button class="nav-btn" data-view="purchases"><span class="nav-ico">🧾</span><span class="nav-txt">Purchases</span></button>
+    <button class="nav-btn hide-sm" data-view="income"><span class="nav-ico">💰</span><span class="nav-txt">Money in</span></button>
     <button class="nav-btn" data-view="credits"><span class="nav-ico">💳</span><span class="nav-txt">Credits</span></button>
     <button class="nav-btn" data-view="analytics"><span class="nav-ico">📈</span><span class="nav-txt">Analytics</span></button>
     <button class="nav-btn hide-sm" data-view="budget"><span class="nav-ico">🎯</span><span class="nav-txt">Budget</span></button>
@@ -114,6 +115,17 @@ setTimeout(function () {
     <button class="nav-btn only-sm" id="nav-more" aria-expanded="false" aria-controls="more-sheet"><span class="nav-ico">☰</span><span class="nav-txt">More</span></button>
   </nav>
 </header>
+
+<!-- ============ AI status strip — on every screen ============
+     The app and its parts are the model's body; this line says whether a
+     model is attached and how much of the app it may reach. Tap to change
+     both. Never shows or stores the key. -->
+<button type="button" class="ai-strip" id="ai-strip" title="AI connection and coverage">
+  <span class="ai-dot" id="ai-dot" aria-hidden="true"></span>
+  <span class="ai-strip-txt" id="ai-strip-txt">AI · not connected</span>
+  <span class="ai-strip-scope" id="ai-strip-scope"></span>
+  <span class="ai-strip-go">Settings ›</span>
+</button>
 
 <main class="main">
   <!-- ============ DASHBOARD ============ -->
@@ -184,6 +196,71 @@ setTimeout(function () {
         <button class="btn ghost small" id="page-prev">← Prev</button>
         <span id="page-info"></span>
         <button class="btn ghost small" id="page-next">Next →</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MONEY IN (income) ============
+       The other half of the ledger. Money out is a purchase; money in is a
+       row here. Nothing arrives on its own: a statement is read into
+       candidates, a person ticks them, and only then are they recorded. -->
+  <section id="view-income" class="view hidden">
+    <div class="kpis" id="income-kpis"></div>
+
+    <div class="card" id="stmt-card">
+      <div class="card-head"><h3>📥 Import a statement</h3>
+        <span class="legend">MoMo · bank · till — read, tick, record</span></div>
+      <div class="import-bar">
+        <input type="file" id="stmt-csv" accept=".csv,.txt,text/csv,text/plain" class="hidden">
+        <button type="button" class="btn secondary" id="btn-stmt-csv">📂 CSV / text file</button>
+        <input type="file" id="stmt-img" accept="image/*" capture="environment" class="hidden">
+        <button type="button" class="btn secondary" id="btn-stmt-img">📷 Screenshot</button>
+        <span class="grow"></span>
+        <button type="button" class="btn ghost" id="btn-stmt-clear">Clear</button>
+      </div>
+      <textarea id="stmt-text" class="stmt-text" rows="4" spellcheck="false"
+        placeholder="…or paste statement lines here: date, description, amount"></textarea>
+      <div class="pager">
+        <button type="button" class="btn primary" id="btn-stmt-read">Read statement</button>
+        <span class="count" id="stmt-note"></span>
+      </div>
+      <div id="stmt-out" class="hidden">
+        <div class="stmt-sum">
+          <span id="stmt-summary"></span>
+          <span class="grow"></span>
+          <span class="count" id="stmt-src"></span>
+        </div>
+        <div class="stmt-warn hidden" id="stmt-warn" role="status" aria-live="polite"></div>
+        <div class="stmt-rows" id="stmt-rows"></div>
+        <div class="pager">
+          <button type="button" class="btn primary" id="btn-stmt-record">Record money in</button>
+          <span class="count" id="stmt-rec-note"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="filters">
+        <input type="search" id="income-q" placeholder="Search source, reference…" aria-label="Search money in">
+        <select id="income-month" aria-label="Month"><option value="">All months</option></select>
+        <button class="btn ghost" id="income-reset">Reset</button>
+        <span class="grow"></span>
+        <span class="count" id="income-count"></span>
+        <button type="button" class="btn primary" id="btn-income-add">＋ Money in</button>
+      </div>
+      <div class="table-wrap">
+        <table class="ledger">
+          <thead>
+            <tr><th>Date</th><th>Source</th><th>Reference</th><th class="num">Amount</th>
+                <th>Branch</th><th>Memo</th><th></th></tr>
+          </thead>
+          <tbody id="income-body"></tbody>
+        </table>
+      </div>
+      <div class="pager">
+        <button class="btn ghost small" id="income-prev">← Prev</button>
+        <span id="income-page"></span>
+        <button class="btn ghost small" id="income-next">Next →</button>
       </div>
     </div>
   </section>
@@ -275,8 +352,10 @@ setTimeout(function () {
   </div>
   <div class="more-list">
     <button class="nav-btn" data-view="budget"><span class="nav-ico">🎯</span><span class="nav-txt">Budget</span></button>
+    <button class="nav-btn" data-view="income"><span class="nav-ico">💰</span><span class="nav-txt">Money in</span></button>
     <button class="nav-btn" data-view="branches"><span class="nav-ico">🏬</span><span class="nav-txt">Branches</span></button>
     <button class="nav-btn" id="btn-calc-more"><span class="nav-ico">🧮</span><span class="nav-txt">Calculator</span></button>
+    <button class="nav-btn" id="btn-ai-more"><span class="nav-ico">🤖</span><span class="nav-txt">AI settings</span></button>
     <button class="nav-btn hidden" id="btn-install-more"><span class="nav-ico">⤓</span><span class="nav-txt">Install app</span></button>
   </div>
 </aside>
@@ -288,6 +367,26 @@ setTimeout(function () {
       <h3 id="dialog-title">🧾 New purchase</h3>
       <button type="button" class="btn ghost small" data-close>✕</button>
     </div>
+
+    <!-- capture → extract → confirm. The scan only proposes; nothing is
+         written until "Save purchase", which posts to /api/purchases. -->
+    <div class="scan-bar" id="scan-bar">
+      <button type="button" class="btn ghost small" id="btn-scan">📷 Scan a slip</button>
+      <button type="button" class="btn ghost small" id="btn-paste">📋 Paste text</button>
+      <span class="scan-note" id="scan-note"></span>
+    </div>
+    <input type="file" id="scan-file" accept="image/*" capture="environment" class="hidden">
+    <div class="paste-box hidden" id="paste-box">
+      <textarea id="paste-text" rows="3" spellcheck="false"
+        placeholder="Paste the receipt, ledger page or statement text here."></textarea>
+      <div class="paste-actions">
+        <button type="button" class="btn ghost small" id="btn-read-text">Read text</button>
+        <button type="button" class="btn ghost small" id="btn-paste-close">✕ Close</button>
+      </div>
+    </div>
+    <div class="scan-err" id="scan-err"></div>
+    <div class="review-card hidden" id="review-card" role="status" aria-live="polite"></div>
+
     <div class="form-grid">
       <label>Date <input type="date" id="f-date" required></label>
       <label>Branch <select id="f-branch"></select></label>
@@ -324,6 +423,33 @@ setTimeout(function () {
     <div class="dialog-foot">
       <button type="button" class="btn ghost" data-close>Cancel</button>
       <button type="submit" class="btn primary big">✓ Save purchase</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ Money in dialog ============ -->
+<dialog id="income-dialog">
+  <form id="income-form">
+    <div class="dialog-head">
+      <h3>💰 Money in</h3>
+      <button type="button" class="btn ghost small" data-close>✕</button>
+    </div>
+    <div class="form-grid">
+      <label>Date <input type="date" id="i-date" required></label>
+      <label>Amount <input type="number" id="i-amount" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00" required></label>
+      <label class="full">Source <span class="hint">who or what paid — walk-in sales, a MoMo name, a bank deposit</span>
+        <input type="text" id="i-source" maxlength="80" placeholder="e.g. Walk-in sales, MoMo - Kwame" required>
+      </label>
+      <label>Reference <input type="text" id="i-ref" maxlength="40" placeholder="e.g. MM9912"></label>
+      <label>Branch <select id="i-branch"></select></label>
+      <label class="full">Memo
+        <input type="text" id="i-memo" maxlength="140" placeholder="optional note…">
+      </label>
+    </div>
+    <div class="form-err" id="i-err"></div>
+    <div class="dialog-foot">
+      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="submit" class="btn primary big">✓ Save money in</button>
     </div>
   </form>
 </dialog>
@@ -372,6 +498,57 @@ setTimeout(function () {
     <div class="dialog-foot">
       <button type="button" class="btn ghost" data-close>Cancel</button>
       <button type="submit" class="btn primary">Save identity</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ AI connection & coverage ============
+     The key never leaves this device: it is kept in localStorage and sent to
+     nothing but the provider chosen here — not to our server, not to anyone
+     else. Everything else on this dialog is about how much of the app the
+     model is allowed to reach. -->
+<dialog id="ai-dialog">
+  <form id="ai-form">
+    <div class="dialog-head">
+      <h3>🤖 AI connection</h3>
+      <button type="button" class="btn ghost small" data-close>✕</button>
+    </div>
+    <p class="dialog-sub">Pick a free provider, paste its key, then choose how much of this app the model may reach. Without a key the app still works — it just reads slips with built-in rules instead of a model.</p>
+
+    <div class="form-grid">
+      <label class="full">Provider
+        <select id="ai-provider"></select>
+      </label>
+      <label class="full">API key
+        <span class="key-row">
+          <input type="password" id="ai-key" autocomplete="off" spellcheck="false" placeholder="paste your free key">
+          <button type="button" class="btn ghost small" id="btn-ai-forget">Forget</button>
+        </span>
+        <a class="ai-get" id="ai-get-key" href="#" target="_blank" rel="noopener">Get a free key ↗</a>
+      </label>
+      <label class="full">Model <input type="text" id="ai-model" list="ai-model-list" spellcheck="false" placeholder="model id">
+        <datalist id="ai-model-list"></datalist>
+      </label>
+      <label class="full hidden" id="ai-custom-wrap">Base URL (OpenAI-compatible) <input type="url" id="ai-base" spellcheck="false" placeholder="https://example.com/v1"></label>
+    </div>
+
+    <div class="ai-areas-head"><b>What the model may reach</b> <span class="hint">you decide the coverage</span></div>
+    <div class="ai-areas" id="ai-areas"></div>
+
+    <div class="ai-instr hidden" id="ai-instr">
+      <label>⚙️ Ask it to change something
+        <input type="text" id="instr-text" maxlength="120" placeholder="e.g. set payment method to Mobile Money">
+      </label>
+      <button type="button" class="btn ghost small" id="btn-instr">Propose</button>
+      <div class="instr-out" id="instr-out"></div>
+    </div>
+
+    <div class="ai-test" id="ai-test"></div>
+    <div class="form-err" id="ai-err"></div>
+
+    <div class="dialog-foot">
+      <button type="button" class="btn ghost" id="btn-ai-test">Test connection</button>
+      <button type="submit" class="btn primary">Save</button>
     </div>
   </form>
 </dialog>

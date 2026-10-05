@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
 
 const COLORS = {
-  spend: "#c9971f", credit: "#f87171", paid: "#34d399",
+  spend: "#c9971f", credit: "#f87171", paid: "#34d399", income: "#34d399",
   cash: "#cbd5e1", bank: "#d4af37", mobile: "#2dd4bf",
 };
 const PALETTE = ["#f59e0b", "#d4af37", "#7c3aed", "#2dd4bf", "#f87171",
@@ -18,7 +18,16 @@ const state = {
   branch_id: null,
   page: 1,
   filters: { q: "", month: "", dist: "", product: "", pay: "", owed: false },
+  income: { q: "", month: "", page: 1 },
+  // Working copy of the last statement read. It lives here, unticked and
+  // unrecorded, until the owner presses "Record money in" — a statement
+  // never writes a row by itself.
+  stmt: { rows: [], image: "", source: "" },
   budget: { year: null, month: null, rows: [] },
+  // Remaining line items from a scan, recorded one at a time through the
+  // normal save path so a 3-line receipt becomes 3 purchases.
+  scanQueue: [],
+  review: [],
 };
 
 /* ---------- shop identity (per-device, works offline) ---------- */
@@ -351,9 +360,10 @@ const OFFLINE_ENGINE = (() => {
 
 let serverAvailable = true;
 
-function offlineRequest(method, pathname, qs, body) {
+async function offlineRequest(method, pathname, qs, body) {
   if (typeof PWDB === "undefined") throw new Error("offline engine not available in this browser");
-  const r = PWDB.request(method, pathname, qs, body);
+  // awaited, not assumed-sync: /api/ai/extract may take a model round-trip.
+  const r = await PWDB.request(method, pathname, qs, body);
   if (r.status >= 400) throw new Error(r.body.error || `HTTP ${r.status}`);
   return r.body;
 }
@@ -381,7 +391,7 @@ async function api(path, opts) {
   // Installed PWA (add to home screen), or the server was found to be
   // missing -> fully offline engine, no internet needed.
   if (OFFLINE_ENGINE || !serverAvailable) {
-    return offlineRequest(method, u.pathname, qs, body);
+    return await offlineRequest(method, u.pathname, qs, body);
   }
 
   let res = null, netError = null;
@@ -389,14 +399,14 @@ async function api(path, opts) {
   catch (e) { netError = e; }
 
   // Network failure (offline, host down) -> run on this device.
-  if (netError) return serverDown(path, method, u, qs, body);
+  if (netError) return await serverDown(path, method, u, qs, body);
 
   // Our server always answers /api/* with application/json (even errors).
   // Anything else (404 HTML, SPA fallback page) means there is no real
   // backend here -> fall back to the offline engine instead of failing.
   const ct = res.headers.get("content-type") || "";
   if (path.startsWith("/api/") && !ct.includes("application/json")) {
-    return serverDown(path, method, u, qs, body);
+    return await serverDown(path, method, u, qs, body);
   }
 
   const rbody = await res.json().catch(() => ({}));
@@ -544,24 +554,27 @@ async function loadDashboard() {
       sub: `${num(curM.buys)} purchases ${delta !== null ? `<span class="k-delta ${delta >= 0 ? "up" : "down"}">${delta >= 0 ? "▲" : "▼"} ${Math.abs(delta * 100).toFixed(0)}%</span>` : ""}` },
     { c: "orange", label: "Last month", value: cur(prevM ? prevM.spend : 0),
       sub: prevM ? `${num(prevM.buys)} purchases` : "no data yet" },
+    { c: "green", label: "Money in this month", value: cur(curM.income || 0),
+      sub: `net ${cur((curM.income || 0) - spent)} · tap for detail`, goto: "income" },
     { c: "red", label: "Outstanding credit", value: cur(creds.outstanding),
       sub: `${creds.open_count} unpaid account${creds.open_count === 1 ? "" : "s"}` },
     { c: "green", label: "Budget left to spend", value: remaining !== null ? cur(remaining) : "—",
       sub: budget.saved ? `of ${cur(budget.spendable)} after savings` : "set a budget in 🎯 Budget" },
   ];
   $("#kpis").innerHTML = kpis.map((k) => `
-    <div class="kpi ${k.c}">
+    <div class="kpi ${k.c}" ${k.goto ? `data-goto="${k.goto}"` : ""}>
       <div class="k-label">${k.label}</div>
       <div class="k-value">${k.value}</div>
       <div class="k-sub">${k.sub}</div>
     </div>`).join("");
 
   $("#legend-flow").innerHTML = legend([
-    ["Spend", COLORS.spend], ["New credit", COLORS.credit],
+    ["Money in", COLORS.income], ["Spend", COLORS.spend], ["New credit", COLORS.credit],
   ]);
   $("#chart-flow").innerHTML = groupedBars(
     months.map((m) => monthLabel(m.month)),
     [
+      { name: "Money in", color: COLORS.income, values: months.map((m) => m.income || 0) },
       { name: "Spend", color: COLORS.spend, values: months.map((m) => m.spend) },
       { name: "New credit", color: COLORS.credit, values: months.map((m) => m.credit_new) },
     ],
@@ -700,6 +713,237 @@ function pickDialog(title, optionsHtml, btnLabel) {
     dlg.querySelector("#pick-cancel2").onclick = () => close(null);
     dlg.showModal();
   });
+}
+
+/* ============================ MONEY IN ============================
+   The other half of the ledger. A purchase is money out; this is money in.
+   Statements arrive as *candidates* — read, tick, then record — so nothing
+   lands in the books without the owner having seen it first. */
+async function loadIncome() {
+  const f = state.income;
+  const qs = new URLSearchParams();
+  if (state.branch_id) qs.set("branch_id", state.branch_id);
+  if (f.q) qs.set("q", f.q);
+  if (f.month) qs.set("month", f.month);
+  qs.set("page", f.page);
+  qs.set("page_size", 25);
+
+  const [d, a] = await Promise.all([api(`/api/income?${qs}`), api(analyticsUrl(6))]);
+  f.page = d.page;
+  const t = a.totals;
+
+  const card = $("#stmt-card");
+  if (card) card.classList.toggle("hidden", !aiAllows("capture"));
+  const sel = $("#income-month");
+  if (sel) sel.value = f.month || "";
+
+  $("#income-count").textContent = `${d.total} records`;
+  $("#income-page").textContent = `Page ${d.page} of ${d.pages}`;
+  $("#income-prev").disabled = d.page <= 1;
+  $("#income-next").disabled = d.page >= d.pages;
+
+  $("#income-kpis").innerHTML = `
+    <div class="kpi green"><div class="k-label">Money in <span class="sub">(6 mo)</span></div>
+      <div class="k-value">${cur(t.income)}</div><div class="k-sub">what came into the shop</div></div>
+    <div class="kpi orange"><div class="k-label">Money out <span class="sub">(6 mo)</span></div>
+      <div class="k-value">${cur(t.spend)}</div><div class="k-sub">${num(t.buys)} purchases</div></div>
+    <div class="kpi ${t.net >= 0 ? "green" : "red"}"><div class="k-label">Left over <span class="sub">(6 mo)</span></div>
+      <div class="k-value">${cur(t.net)}</div><div class="k-sub">money in − money out</div></div>
+    <div class="kpi"><div class="k-label">Records here</div>
+      <div class="k-value">${num(d.total)}</div><div class="k-sub">${branchLabel(state.branch_id)}</div></div>`;
+
+  $("#income-body").innerHTML = d.rows.map((r) => `<tr>
+      <td data-label="Date">${r.date}</td>
+      <td data-label="Source"><strong>${esc(r.source)}</strong></td>
+      <td data-label="Reference">${esc(r.reference || "—")}</td>
+      <td class="num amt tot" data-label="Amount">${cur(r.amount)}</td>
+      <td class="branch-tag" data-label="Branch">${esc(r.branch)}</td>
+      <td data-label="Memo">${r.memo ? `<span class="branch-tag memo">${esc(r.memo)}</span>` : "—"}</td>
+      <td><div class="row-actions">
+        <button class="icon-btn danger" title="Delete" data-inc-del="${r.id}">🗑</button>
+      </div></td>
+    </tr>`).join("") ||
+    `<tr class="empty-row"><td colspan="7">No money in here yet. Add it with ＋ Money in, or read a statement above.</td></tr>`;
+}
+
+/* ---------- statement ingest: read → tick → record ---------- */
+const stmtBranch = () =>
+  state.branch_id || (META.branches[0] && META.branches[0].id) || 0;
+const stmtDateOk = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ""));
+
+function stmtSetBusy(busy) {
+  const b = $("#btn-stmt-read");
+  if (b) b.disabled = !!busy;
+  const n = $("#stmt-note");
+  if (n && busy) n.textContent = "Reading…";
+}
+
+async function readStatement() {
+  const text = ($("#stmt-text").value || "").trim();
+  const image = state.stmt.image;
+  const note = $("#stmt-note");
+  if (!text && !image) {
+    note.textContent = "Paste lines, choose a CSV, or take a screenshot first.";
+    return;
+  }
+  stmtSetBusy(true);
+  try {
+    const payload = image && !text ? { image } : { text };
+    const r = await aiRequest("/api/ai/statement", payload);
+    note.textContent = "";
+    renderStatement(r.candidates || [], r.uncertain || [], r.source || "");
+  } catch (e) {
+    note.textContent = "";
+    $("#stmt-out").classList.add("hidden");
+    toast(e.message, "err");
+  } finally {
+    stmtSetBusy(false);
+    if ($("#btn-stmt-read")) $("#btn-stmt-read").disabled = false;
+  }
+}
+
+function renderStatement(cand, uncertain, source) {
+  state.stmt.rows = (cand || []).map((c, i) => ({
+    i,
+    date: String((c && c.date) || ""),
+    dir: String((c && c.direction) || "").toLowerCase() === "out" ? "out" : "in",
+    amount: Number((c && c.amount) || 0),
+    description: String((c && c.description) || ""),
+    reference: String((c && c.reference) || ""),
+  }));
+  state.stmt.source = source;
+
+  const usable = state.stmt.rows.filter((r) => r.dir === "in" && r.amount > 0 && stmtDateOk(r.date));
+  const spent = state.stmt.rows.filter((r) => r.dir === "out").length;
+
+  $("#stmt-out").classList.remove("hidden");
+  $("#stmt-summary").innerHTML = usable.length
+    ? `<strong>${usable.length}</strong> money in · <span class="sub">${spent} money out, not imported</span>`
+    : `<span class="sub">No money-in rows found</span>`;
+  $("#stmt-src").textContent = source ? `read by ${source}` : "";
+
+  const warn = $("#stmt-warn");
+  if (uncertain.length) {
+    warn.classList.remove("hidden");
+    warn.innerHTML = `<strong>${uncertain.length} to check:</strong> ` +
+      uncertain.slice(0, 6).map((u) => `${esc(u.field)} — ${esc(u.why)}`).join(" · ");
+  } else {
+    warn.classList.add("hidden");
+    warn.innerHTML = "";
+  }
+
+  $("#stmt-rows").innerHTML = state.stmt.rows.map((r) => {
+    const good = r.dir === "in" && r.amount > 0 && stmtDateOk(r.date);
+    const why = !stmtDateOk(r.date) ? "no readable date"
+      : r.amount <= 0 ? "no amount"
+      : r.dir === "out" ? "money out — record it as a purchase instead" : "";
+    return `<label class="stmt-row ${good ? "" : "off"}">
+      <input type="checkbox" class="stmt-tick" data-i="${r.i}" ${good ? "checked" : "disabled"}>
+      <span class="stmt-dir ${r.dir}">${r.dir}</span>
+      <span class="stmt-date">${esc(r.date) || "?"}</span>
+      <span class="stmt-desc">${esc(r.description) || "—"}</span>
+      <span class="stmt-ref">${esc(r.reference)}</span>
+      <span class="stmt-amt">${cur(r.amount)}</span>
+      ${why ? `<span class="stmt-why">${why}</span>` : ""}
+    </label>`;
+  }).join("") || `<p class="sub">Nothing readable in that.</p>`;
+
+  $("#btn-stmt-record").disabled = !usable.length;
+  $("#stmt-rec-note").textContent = usable.length
+    ? `${usable.length} ticked will become money-in rows`
+    : "";
+}
+
+async function recordStatement() {
+  const ticks = Array.prototype.slice.call(
+    document.querySelectorAll("#stmt-rows .stmt-tick")).filter((c) => c.checked);
+  const note = $("#stmt-rec-note");
+  if (!ticks.length) { note.textContent = "Tick the rows you want to keep first."; return; }
+  const branch_id = stmtBranch();
+  let saved = 0;
+  for (const c of ticks) {
+    const r = state.stmt.rows[Number(c.dataset.i)];
+    if (!r) continue;
+    try {
+      await api("/api/income", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          date: r.date, branch_id, amount: r.amount,
+          source: r.description || "Statement", reference: r.reference,
+          memo: "imported from statement",
+        }),
+      });
+      saved += 1;
+    } catch (e) { /* keep going — one bad row must not lose the rest */ }
+  }
+  toast(`${saved} money-in row${saved === 1 ? "" : "s"} recorded ✓`);
+  await refreshMeta();
+  clearStatement();
+  loadIncome();
+}
+
+function clearStatement() {
+  state.stmt = { rows: [], image: "", source: "" };
+  const ta = $("#stmt-text");
+  if (ta) ta.value = "";
+  const out = $("#stmt-out");
+  if (out) out.classList.add("hidden");
+  const note = $("#stmt-note");
+  if (note) note.textContent = "";
+  const rows = $("#stmt-rows");
+  if (rows) rows.innerHTML = "";
+  ["#stmt-csv", "#stmt-img"].forEach((s) => { const el = $(s); if (el) el.value = ""; });
+}
+
+function readFileText(file, into) {
+  if (typeof FileReader === "undefined") { toast("This browser cannot read files", "err"); return; }
+  const fr = new FileReader();
+  fr.onload = () => { into(String(fr.result || "")); readStatement(); };
+  fr.onerror = () => toast("Could not read that file", "err");
+  fr.readAsText(file);
+}
+
+function readShot(file) {
+  compressImage(file).then((dataUrl) => {
+    state.stmt.image = dataUrl;
+    $("#stmt-note").textContent = "Screenshot ready — press Read statement.";
+  }).catch((e) => toast(e.message, "err"));
+}
+
+/* ---------- manual money in ---------- */
+function openIncomeDialog() {
+  $("#income-form").reset();
+  $("#i-err").textContent = "";
+  $("#i-date").value = today();
+  $("#i-branch").innerHTML = META.branches
+    .map((b) => `<option value="${b.id}">${esc(b.name)}</option>`).join("");
+  $("#i-branch").value = stmtBranch();
+  $("#income-dialog").showModal();
+  setTimeout(() => $("#i-amount").focus(), 50);
+}
+
+async function submitIncome(e) {
+  e.preventDefault();
+  const err = $("#i-err");
+  err.textContent = "";
+  const payload = {
+    date: $("#i-date").value,
+    branch_id: Number($("#i-branch").value),
+    amount: Number($("#i-amount").value),
+    source: $("#i-source").value.trim(),
+    reference: $("#i-ref").value.trim(),
+    memo: $("#i-memo").value.trim(),
+  };
+  try {
+    await api("/api/income", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    $("#income-dialog").close();
+    toast("Money in recorded ✓");
+    await refreshMeta();
+    loadIncome();
+  } catch (ex) { err.textContent = ex.message; }
 }
 
 /* ============================ CREDITS ============================ */
@@ -962,6 +1206,7 @@ async function loadBranches() {
 const TITLES = {
   dashboard: ["Dashboard", "Everything at a glance"],
   purchases: ["Purchases", "Every item you buy, recorded"],
+  income: ["Money in", "Sales, deposits and takings"],
   credits: ["Credit tracker", "What you owe suppliers"],
   analytics: ["Analytics", "Where every cedi goes"],
   budget: ["Budget", "Plan, save, and track"],
@@ -977,11 +1222,13 @@ async function switchView(view) {
   /* On phones the Budget/Branches tabs live inside the "More" sheet, so the
      More tab itself has to light up while one of them is on screen. */
   const more = $("#nav-more");
-  if (more) more.classList.toggle("active", view === "budget" || view === "branches");
+  if (more) more.classList.toggle("active",
+    view === "budget" || view === "branches" || view === "income");
   closeMore();
   try {
     if (view === "dashboard") await loadDashboard();
     else if (view === "purchases") await loadPurchases();
+    else if (view === "income") await loadIncome();
     else if (view === "credits") await loadCredits();
     else if (view === "analytics") await loadAnalytics();
     else if (view === "budget") await loadBudget();
@@ -1018,6 +1265,8 @@ function populateFilters() {
   const f = state.filters;
   $("#filter-month").innerHTML = `<option value="">All months</option>` +
     (META.months || []).map((m) => `<option value="${esc(m)}">${esc(monthLabel(m))}</option>`).join("");
+  $("#income-month").innerHTML = `<option value="">All months</option>` +
+    (META.months || []).map((m) => `<option value="${esc(m)}">${esc(monthLabel(m))}</option>`).join("");
   $("#filter-dist").innerHTML = `<option value="">All distributors</option>` +
     (META.distributor_options || []).map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join("");
   $("#filter-product").innerHTML = `<option value="">All items</option>` +
@@ -1026,17 +1275,21 @@ function populateFilters() {
   $("#filter-month").value = f.month || "";
   $("#filter-dist").value = f.dist || "";
   $("#filter-product").value = f.product || "";
+  $("#income-month").value = state.income.month || "";
 }
 
 function populateBranches() {
   const opts = META.branches.map((b) => `<option value="${b.id}">${esc(b.name)}</option>`).join("");
   $("#branch-select").innerHTML = `<option value="">All branches</option>` + opts;
   $("#f-branch").innerHTML = opts;
+  $("#i-branch").innerHTML = opts;
   if (state.branch_id) {
     $("#branch-select").value = state.branch_id;
     $("#f-branch").value = state.branch_id;
+    $("#i-branch").value = state.branch_id;
   } else if (META.branches.length) {
     $("#f-branch").value = META.branches[0].id;
+    $("#i-branch").value = META.branches[0].id;
   }
 }
 
@@ -1052,6 +1305,9 @@ function openEntryDialog() {
   $("#f-method").value = "Cash";
   $("#f-credit-paid").value = "";
   $("#form-err").textContent = "";
+  resetScan();
+  const scanBar = $("#scan-bar");
+  if (scanBar) scanBar.classList.toggle("hidden", !aiAllows("capture"));
   $("#f-branch").value = state.branch_id || META.branches[0].id;
   updateCreditMode();
   updateLiveBox();
@@ -1113,8 +1369,22 @@ async function submitEntry(e) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    $("#entry-dialog").close();
     refreshMeta();
+    if (state.scanQueue.length) {
+      // A scanned slip can hold several lines. Each one is confirmed and saved
+      // exactly like the first — the dialog stays open until they are all done.
+      const next = state.scanQueue.shift();
+      const left = state.scanQueue.length;
+      applyDraftItem(next);
+      $("#f-credit-paid").value = "";
+      updateCreditMode();
+      updateLiveBox();
+      $("#form-err").textContent = "";
+      toast(`✓ Saved ${payload.product} · next: ${next.product || "line"}${left ? ` (+${left} more)` : " (last line)"}`);
+      setTimeout(() => $("#f-product").focus(), 50);
+      return;
+    }
+    $("#entry-dialog").close();
     toast(`✓ Saved — ${payload.product} · ${cur(payload.total_amount)}${r.credit ? ` · credit balance ${cur(r.credit.balance)}` : ""}`);
     switchView("dashboard");
   } catch (err) {
@@ -1138,6 +1408,505 @@ async function submitPay(e) {
   }
 }
 
+/* ---------- AI: connection, coverage, status (per device) ----------
+   The app and every one of its parts are the model's body. This is the nerve
+   that says which parts it may reach, and whether a model is attached at all.
+
+   The key lives only in this device's localStorage. It is sent to nothing but
+   the provider the owner picked here — never to our server, never to a third
+   party. Without one, both engines fall back to the same built-in rules. */
+const AI_KEY_STORAGE = "pwbudget.ai.v1";
+
+const AI_PROVIDERS = [
+  { id: "groq", name: "Groq", label: "Groq · free, no card",
+    base: "https://api.groq.com/openai/v1",
+    get: "https://console.groq.com/keys",
+    models: ["groq/compound", "openai/gpt-oss-120b", "qwen/qwen3.6-27b"] },
+  { id: "gemini", name: "Gemini", label: "Google Gemini · free tier",
+    base: "https://generativelanguage.googleapis.com/v1beta/openai",
+    get: "https://aistudio.google.com/apikey",
+    models: ["gemini-2.5-flash", "gemini-2.0-flash"] },
+  { id: "openrouter", name: "OpenRouter", label: "OpenRouter · free models",
+    base: "https://openrouter.ai/api/v1",
+    get: "https://openrouter.ai/keys",
+    models: ["google/gemma-4-31b-it:free", "openai/gpt-oss-20b:free"] },
+  { id: "custom", name: "Custom", label: "Custom · OpenAI-compatible",
+    base: "", get: "", models: [] },
+];
+
+/* The coverage. Every area is live, not aspirational: `capture` decides
+   whether the scan bar exists, `catalogue` and `money` decide what context
+   travels with a scan, `app` decides whether it may propose changes to the
+   app itself. Turn one off and it stops being part of the model's body. */
+const AI_AREAS = [
+  { id: "capture", short: "capture", ico: "📷", label: "Receipt & slip capture",
+    note: "photograph or paste a slip and have the form filled in" },
+  { id: "catalogue", short: "catalogue", ico: "🏷️", label: "My items & suppliers",
+    note: "share your existing names so it uses yours, not invented ones" },
+  { id: "money", short: "credit", ico: "💰", label: "Credit you owe",
+    note: "share outstanding credit so suggestions fit what is left" },
+  { id: "app", short: "settings", ico: "⚙️", label: "App settings",
+    note: "let it propose changes to this app itself" },
+];
+
+let AI = { provider: "groq", base: "", model: "", key: "", areas: null };
+let AI_LAST_ERROR = "";
+
+const aiAreaDefault = (id) => id === "capture" || id === "catalogue";
+
+function loadAI() {
+  try {
+    const raw = localStorage.getItem(AI_KEY_STORAGE);
+    const o = raw ? JSON.parse(raw) : null;
+    if (o && typeof o === "object") {
+      AI = {
+        provider: String(o.provider || "groq"),
+        base: String(o.base || ""),
+        model: String(o.model || ""),
+        key: String(o.key || ""),
+        areas: o.areas && typeof o.areas === "object" ? o.areas : null,
+      };
+    }
+  } catch (e) { /* private mode: stay unconfigured */ }
+  pushProvider();
+}
+
+function saveAI() {
+  try { localStorage.setItem(AI_KEY_STORAGE, JSON.stringify(AI)); } catch (e) { /* quota */ }
+  pushProvider();
+}
+
+const aiPreset = () => AI_PROVIDERS.find((p) => p.id === AI.provider) || AI_PROVIDERS[0];
+const aiBase = () => (AI.provider === "custom" ? AI.base : aiPreset().base).replace(/\/+$/, "");
+const aiModel = () => (AI.model || aiPreset().models[0] || "").trim();
+const aiConfigured = () => !!(AI.key && aiBase() && aiModel());
+
+/* Install the device's connection into the offline engine. This is the one
+   place the key is handed over; it never travels anywhere else. */
+function pushProvider() {
+  if (typeof PWDB === "undefined" || !PWDB.setProvider) return;
+  PWDB.setProvider(aiConfigured() ? { baseUrl: aiBase(), model: aiModel(), key: AI.key } : null);
+}
+
+function aiAllows(id) {
+  const saved = AI.areas;
+  if (saved && Object.prototype.hasOwnProperty.call(saved, id)) return !!saved[id];
+  return aiAreaDefault(id);
+}
+
+function setAiArea(id, on) {
+  const areas = Object.assign({}, AI.areas || {});
+  AI_AREAS.forEach((a) => { areas[a.id] = aiAllows(a.id); });
+  areas[id] = !!on;
+  AI.areas = areas;
+}
+
+function aiScopeSummary() {
+  const on = AI_AREAS.filter((a) => aiAllows(a.id)).map((a) => a.short);
+  return on.length ? on.join(" · ") : "nothing";
+}
+
+function aiStatus() {
+  const name = aiPreset().name;
+  if (!aiConfigured())
+    return { tone: "off", text: "AI · not connected",
+             detail: "No key yet — slips are read with built-in rules. Add a free key to use a model." };
+  if (AI_LAST_ERROR)
+    return { tone: "bad", text: `AI · ${name} · problem`, detail: AI_LAST_ERROR };
+  return { tone: "on", text: `AI · ${name} · ${aiModel()}`, detail: "Connected on this device." };
+}
+
+function renderAiStrip() {
+  const dot = $("#ai-dot"), txt = $("#ai-strip-txt"), scope = $("#ai-strip-scope");
+  if (!txt) return;
+  const s = aiStatus();
+  if (dot) dot.className = "ai-dot " + s.tone;
+  txt.textContent = s.text;
+  if (scope) scope.textContent = "· " + aiScopeSummary();
+  const strip = $("#ai-strip");
+  if (strip) strip.title = `${s.detail}\nCoverage: ${aiScopeSummary()}`;
+}
+
+/* What the owner has allowed to travel with a scan. Built fresh each time so
+   turning an area off takes effect immediately; a failure here is never a
+   blocker — context is a courtesy, not a requirement. */
+async function aiBuildContext() {
+  const bits = [];
+  if (aiAllows("catalogue") && META) {
+    const prods = (META.products || []).map((p) => p.name).filter(Boolean);
+    const dists = (META.distributors || []).map((d) => d.name).filter(Boolean);
+    if (prods.length) bits.push("My items, spelled this way: " + prods.slice(0, 30).join(", "));
+    if (dists.length) bits.push("My suppliers, spelled this way: " + dists.slice(0, 30).join(", "));
+  }
+  if (aiAllows("money")) {
+    try {
+      const c = await api("/api/credits");
+      const open = (c && c.open) || [];
+      const owed = open.reduce((s, x) => s + (Number(x.balance) || 0), 0);
+      if (open.length) bits.push(`I have ${open.length} unpaid supplier bill(s) totalling ${cur(owed)}.`);
+    } catch (e) { /* ignore */ }
+  }
+  return bits.join("\n");
+}
+
+/* One entry point for extraction, in both modes. A key on this device always
+   wins: the engine holding the key is the only one that may call out, and it
+   is asked directly so the key never leaves the device. With no key we ask
+   the server, which uses its own key if configured, or the same rules the
+   offline engine would run. */
+async function aiExtractRequest(payload) {
+  const context = await aiBuildContext();
+  const body = Object.assign({}, payload);
+  if (context) body.context = context;
+  const opts = { method: "POST", headers: { "Content-Type": "application/json" },
+                 body: JSON.stringify(body) };
+  if (aiConfigured() && typeof PWDB !== "undefined") {
+    let r;
+    try {
+      r = await offlineRequest("POST", "/api/ai/extract", {}, body);
+    } catch (e) {
+      throw e;                       // a plain validation error, not an AI fault
+    }
+    // db.js silently falls back to the built-in rules when the model cannot
+    // be reached. That must not be invisible: the strip is where it shows.
+    if (r && r.source !== "model") {
+      AI_LAST_ERROR = `Could not reach ${aiModel()} — using built-in rules instead.`;
+    } else {
+      AI_LAST_ERROR = "";
+    }
+    renderAiStrip();
+    return r;
+  }
+  return await api("/api/ai/extract", opts);
+}
+
+/* ---------- settings dialog ---------- */
+function openAiDialog() {
+  AI_LAST_ERROR = "";
+  renderAiSettings();
+  $("#ai-dialog").showModal();
+}
+
+function renderAiSettings() {
+  const sel = $("#ai-provider");
+  if (sel) {
+    sel.innerHTML = AI_PROVIDERS.map((p) =>
+      `<option value="${p.id}"${p.id === AI.provider ? " selected" : ""}>${esc(p.label)}</option>`).join("");
+  }
+  const dl = $("#ai-model-list");
+  if (dl) dl.innerHTML = (aiPreset().models || [])
+    .map((m) => `<option value="${esc(m)}"></option>`).join("");
+  const key = $("#ai-key");
+  if (key) key.value = AI.key;
+  const model = $("#ai-model");
+  if (model) model.value = aiModel();
+  const base = $("#ai-base");
+  if (base) base.value = AI.provider === "custom" ? AI.base : aiPreset().base;
+  const wrap = $("#ai-custom-wrap");
+  if (wrap) wrap.classList.toggle("hidden", AI.provider !== "custom");
+  const get = $("#ai-get-key");
+  if (get) {
+    const url = aiPreset().get;
+    get.classList.toggle("hidden", !url);
+    if (url) get.setAttribute("href", url);
+  }
+  renderAiAreas();
+  renderAiTest("");
+  const err = $("#ai-err");
+  if (err) err.textContent = "";
+  renderAiStrip();
+}
+
+function renderAiAreas() {
+  const box = $("#ai-areas");
+  if (!box) return;
+  box.innerHTML = AI_AREAS.map((a) => `
+    <label class="ai-area${aiAllows(a.id) ? " on" : ""}">
+      <input type="checkbox" data-area="${a.id}"${aiAllows(a.id) ? " checked" : ""}>
+      <span class="ai-area-txt"><b>${a.ico} ${esc(a.label)}</b><small>${esc(a.note)}</small></span>
+    </label>`).join("");
+  const instr = $("#ai-instr");
+  if (instr) instr.classList.toggle("hidden", !aiAllows("app"));
+}
+
+function renderAiTest(msg) {
+  const box = $("#ai-test");
+  if (box) box.textContent = msg || "";
+}
+
+function readAiForm() {
+  return {
+    provider: (($("#ai-provider") || {}).value || "groq"),
+    key: (($("#ai-key") || {}).value || "").trim(),
+    model: (($("#ai-model") || {}).value || "").trim(),
+    base: (($("#ai-base") || {}).value || "").trim(),
+  };
+}
+
+/* Prove the key, endpoint and model all work by making the engine do the one
+   thing it exists for and checking it came back from a model rather than from
+   the built-in rules. */
+async function testAiConnection() {
+  const err = $("#ai-err");
+  err.textContent = "";
+  const form = readAiForm();
+  const saved = Object.assign({}, AI);
+  Object.assign(AI, form);
+  pushProvider();
+  if (!aiConfigured()) {
+    Object.assign(AI, saved);
+    pushProvider();
+    renderAiStrip();
+    renderAiTest("");
+    err.textContent = "A provider, a key and a model are all needed first.";
+    return false;
+  }
+  renderAiTest("Testing…");
+  let ok = false, why = "";
+  try {
+    const r = await offlineRequest("POST", "/api/ai/extract", {},
+      { text: "Ceda supplied 2 bags of powder for 21600 on 22/09/2026" });
+    ok = r && r.source === "model";
+    if (!ok) why = "the model did not answer — check the key and the model id";
+  } catch (e) {
+    why = e.message;
+  }
+  Object.assign(AI, saved);
+  pushProvider();
+  if (ok) {
+    AI_LAST_ERROR = "";
+    renderAiTest(`✓ ${aiModel()} answered — ${aiPreset().name} is working.`);
+  } else {
+    AI_LAST_ERROR = why || "could not reach the model";
+    renderAiTest("");
+    err.textContent = AI_LAST_ERROR;
+  }
+  renderAiStrip();
+  return ok;
+}
+
+/* ---------- settings dialog: the model proposing a change to the app ---------- */
+async function proposeChange() {
+  const instr = (($("#instr-text") || {}).value || "").trim();
+  const out = $("#instr-out"), err = $("#ai-err");
+  err.textContent = "";
+  if (!instr) { out.innerHTML = ""; err.textContent = "Type what should change first."; return; }
+  const draft = {
+    date: (($("#f-date") || {}).value || ""),
+    distributor: (($("#f-dist") || {}).value || ""),
+    items: [{
+      product: (($("#f-product") || {}).value || ""),
+      unit: (($("#f-unit") || {}).value || ""),
+      quantity: Number(($("#f-qty") || {}).value) || 0,
+      total_amount: Number(($("#f-total") || {}).value) || 0,
+    }],
+    payment_method: (($("#f-method") || {}).value || ""),
+    memo: (($("#f-memo") || {}).value || ""),
+  };
+  out.innerHTML = "";
+  try {
+    const r = await aiRequest("/api/ai/instruct", { draft, instruction: instr });
+    const ch = (r && r.patch && r.patch.changes) || {};
+    const keys = Object.keys(ch);
+    if (!keys.length) {
+      out.innerHTML = `<span class="instr-none">Nothing to change — it did not recognise a field.</span>`;
+      return;
+    }
+    const rows = keys.map((k) => `<div class="instr-row"><span>${esc(k)}</span><b>${esc(String(ch[k]))}</b></div>`).join("");
+    out.innerHTML = `<div class="instr-ask">It proposes:</div>${rows}` +
+      `<button type="button" class="btn secondary small" id="btn-instr-apply">Apply to the form</button>`;
+    const apply = $("#btn-instr-apply");
+    if (apply) apply.onclick = () => {
+      const map = { date: "#f-date", distributor: "#f-dist", payment_method: "#f-method",
+                    memo: "#f-memo", product: "#f-product", unit: "#f-unit",
+                    quantity: "#f-qty", total_amount: "#f-total" };
+      keys.forEach((k) => { const el = $(map[k]); if (el) el.value = String(ch[k]); });
+      updateCreditMode();
+      updateLiveBox();
+      out.innerHTML = `<span class="instr-none">✓ applied — review it, then save as usual.</span>`;
+    };
+  } catch (e) {
+    err.textContent = e.message;
+  }
+}
+
+/* Instruct goes through whichever engine can answer: with a key on this
+   device that is the offline engine (the key stays here), otherwise the
+   server's own configuration. */
+async function aiRequest(path, payload) {
+  const opts = { method: "POST", headers: { "Content-Type": "application/json" },
+                 body: JSON.stringify(payload) };
+  if (aiConfigured() && typeof PWDB !== "undefined")
+    return await offlineRequest("POST", path, {}, payload);
+  return await api(path, opts);
+}
+
+/* ---------- capture → extract → confirm (AI) ----------
+   The extractor proposes; a human confirms; submitEntry() records through the
+   ordinary /api/purchases path. Nothing here writes a purchase on its own.  */
+const SCAN_MAX_EDGE = 1500;   // downscale first — a phone photo is ~5MB
+const SCAN_QUALITY = 0.7;     // ~200-400KB is enough for a printed receipt
+const SCAN_FIELD_LABELS = {
+  date: "Date", distributor: "Distributor", payment_method: "Paid via",
+  memo: "Memo", product: "Item", unit: "Unit",
+  quantity: "Quantity", total_amount: "Total", items: "Line items",
+};
+const SCAN_FIELD_INPUTS = {
+  date: "#f-date", distributor: "#f-dist", payment_method: "#f-method",
+  memo: "#f-memo", product: "#f-product", unit: "#f-unit",
+  quantity: "#f-qty", total_amount: "#f-total",
+};
+
+/* Photo capture needs the server (the offline engine has no vision). Paste
+   works everywhere: the same /api/ai/extract route is served by db.js. */
+function scanOffline() { return OFFLINE_ENGINE || !serverAvailable; }
+
+function setScanBusy(busy) {
+  ["#btn-scan", "#btn-paste", "#btn-read-text"].forEach((s) => {
+    const el = $(s);
+    if (el) el.disabled = !!busy;
+  });
+  const note = $("#scan-note");
+  if (note) note.textContent = busy ? "Reading…" : "";
+}
+
+function flashField(sel) {
+  const el = $(sel);
+  if (!el || !el.classList) return;
+  el.classList.remove("f-flash");
+  void el.offsetWidth;                 // restart the animation on repeat taps
+  el.classList.add("f-flash");
+  setTimeout(() => el.classList.remove("f-flash"), 950);
+}
+
+/* "items[0].unit" -> "Unit", "distributor" -> "Distributor" */
+function scanFieldLabel(field) {
+  const m = /^items\[(\d+)\]\.(.+)$/.exec(String(field || ""));
+  const key = m ? m[2] : String(field || "");
+  const label = SCAN_FIELD_LABELS[key] || key || "Check";
+  return m && Number(m[1]) > 0 ? `${label} (line ${Number(m[1]) + 1})` : label;
+}
+
+/* Only the line sitting in the form is answerable here; later lines are
+   answered when they come up for their own save. */
+function renderReview(uncertain) {
+  const card = $("#review-card");
+  if (!card) return;
+  state.review = Array.isArray(uncertain) ? uncertain.filter((u) => u && u.field) : [];
+  if (!state.review.length) { card.innerHTML = ""; card.classList.add("hidden"); return; }
+  card.classList.remove("hidden");
+  card.innerHTML = `<div class="u-head">⚠ Check these before saving</div>` +
+    state.review.map((u) => {
+      const m = /^items\[(\d+)\]\.(.+)$/.exec(String(u.field));
+      const line = m ? Number(m[1]) : -1;
+      const chips = line > 0 ? "" : (Array.isArray(u.options) ? u.options : [])
+        .map((o) => `<button type="button" class="u-chip" data-u-field="${esc(u.field)}" data-u-val="${esc(String(o))}">${esc(String(o))}</button>`)
+        .join("");
+      return `<div class="u-row">
+        <span class="u-lab">${esc(scanFieldLabel(u.field))}</span>
+        <span class="u-why">${esc(u.why || "check this")}</span>
+        <span class="u-opts">${chips}</span>
+      </div>`;
+    }).join("");
+}
+
+function applyUncertain(field, value) {
+  const m = /^items\[(\d+)\]\.(.+)$/.exec(String(field || ""));
+  const line = m ? Number(m[1]) : -1;
+  if (line > 0) return false;                    // queued line — answered later
+  const sel = SCAN_FIELD_INPUTS[m ? m[2] : String(field)];
+  const el = sel && $(sel);
+  if (!el) return false;
+  el.value = String(value);
+  flashField(sel);
+  state.review = state.review.filter((u) => u.field !== field);
+  renderReview(state.review);
+  if (m && m[2] === "payment_method") updateCreditMode();
+  updateLiveBox();
+  return true;
+}
+
+/* Fill only what the extractor actually found, so a scan never wipes what
+   the shopkeeper already typed. Extra line items wait in state.scanQueue. */
+function fillEntryDraft(draft) {
+  if (!draft || typeof draft !== "object") return 0;
+  if (draft.date) $("#f-date").value = String(draft.date);
+  if (draft.distributor) $("#f-dist").value = String(draft.distributor);
+  if (draft.payment_method) $("#f-method").value = String(draft.payment_method);
+  if (draft.memo) $("#f-memo").value = String(draft.memo);
+  const items = Array.isArray(draft.items) ? draft.items : [];
+  if (items[0]) applyDraftItem(items[0]);
+  state.scanQueue = items.slice(1);
+  updateCreditMode();
+  updateLiveBox();
+  return items.length;
+}
+
+function applyDraftItem(item) {
+  if (!item) return;
+  if (item.product) $("#f-product").value = String(item.product);
+  if (item.unit) $("#f-unit").value = String(item.unit);
+  if (Number(item.quantity) > 0) $("#f-qty").value = String(item.quantity);
+  if (Number(item.total_amount) > 0) $("#f-total").value = String(item.total_amount);
+}
+
+async function runScan(payload) {
+  const err = $("#scan-err");
+  err.textContent = "";
+  setScanBusy(true);
+  try {
+    const r = await aiExtractRequest(payload);
+    const found = fillEntryDraft(r.draft);
+    renderReview(r.uncertain || []);
+    if (!found) err.textContent = "Nothing readable in that — type the entry instead.";
+    else if (state.scanQueue.length) toast(`✓ ${found} line items found — save them one at a time`);
+    else toast("✓ Filled in — check it, then save");
+    return true;
+  } catch (e) {
+    err.textContent = e.message;
+    return false;
+  } finally {
+    setScanBusy(false);
+  }
+}
+
+/* Downscale + JPEG on-device so the upload is small and the camera roll
+   photo never leaves as a full-size original. Returns bare base64. */
+function compressImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read that file."));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("That file is not a readable photo."));
+      img.onload = () => {
+        let w = img.width, h = img.height;
+        const scale = Math.min(1, SCAN_MAX_EDGE / Math.max(w, h));
+        w = Math.max(1, Math.round(w * scale));
+        h = Math.max(1, Math.round(h * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", SCAN_QUALITY).replace(/^data:image\/jpeg;base64,/, ""));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function resetScan() {
+  state.scanQueue = [];
+  renderReview([]);
+  const e = $("#scan-err");
+  if (e) e.textContent = "";
+  const box = $("#paste-box");
+  if (box) box.classList.add("hidden");
+  const txt = $("#paste-text");
+  if (txt) txt.value = "";
+}
+
 /* ---------- bindings ---------- */
 function bindAll() {
   $$(".nav-btn").forEach((b) => b.addEventListener("click", () => {
@@ -1149,6 +1918,13 @@ function bindAll() {
   }));
   document.querySelectorAll("[data-goto]").forEach((b) =>
     b.addEventListener("click", () => switchView(b.dataset.goto)));
+  // KPIs are rebuilt on every dashboard load, so their links need a
+  // container-level listener rather than a one-off binding.
+  const kpiBox = $("#kpis");
+  if (kpiBox) kpiBox.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-goto]");
+    if (b) switchView(b.dataset.goto);
+  });
 
   /* --- phone navigation: "More" tab + bottom sheet --- */
   const moreBtn = $("#nav-more");
@@ -1186,6 +1962,113 @@ function bindAll() {
   $("#entry-form").addEventListener("submit", submitEntry);
   $("#pay-form").addEventListener("submit", submitPay);
   $$("[data-close]").forEach((b) => b.addEventListener("click", () => b.closest("dialog").close()));
+
+  /* --- capture → extract → confirm --- */
+  const scanBtn = $("#btn-scan");
+  if (scanBtn) scanBtn.addEventListener("click", () => {
+    const e = $("#scan-err");
+    e.textContent = "";
+    if (scanOffline()) {
+      e.textContent = "Scanning a photo needs internet — use “Paste text” instead, it works offline.";
+      const box = $("#paste-box");
+      if (box) box.classList.remove("hidden");
+      return;
+    }
+    const f = $("#scan-file");
+    if (f) f.click();
+  });
+  const scanFile = $("#scan-file");
+  if (scanFile) scanFile.addEventListener("change", async (ev) => {
+    const file = ev.target && ev.target.files && ev.target.files[0];
+    ev.target.value = "";                    // allow picking the same photo twice
+    if (!file) return;
+    setScanBusy(true);
+    try {
+      const image = await compressImage(file);
+      setScanBusy(false);
+      await runScan({ image });
+    } catch (err) {
+      setScanBusy(false);
+      $("#scan-err").textContent = err.message;
+    }
+  });
+  const pasteBtn = $("#btn-paste");
+  if (pasteBtn) pasteBtn.addEventListener("click", () => {
+    const box = $("#paste-box");
+    box.classList.toggle("hidden");
+    if (!box.classList.contains("hidden")) {
+      $("#scan-err").textContent = "";
+      const t = $("#paste-text");
+      if (t) t.focus();
+    }
+  });
+  const pasteClose = $("#btn-paste-close");
+  if (pasteClose) pasteClose.addEventListener("click", () => $("#paste-box").classList.add("hidden"));
+  const readBtn = $("#btn-read-text");
+  if (readBtn) readBtn.addEventListener("click", async () => {
+    const t = (($("#paste-text") || {}).value || "").trim();
+    if (!t) { $("#scan-err").textContent = "Paste the receipt or statement text first."; return; }
+    await runScan({ text: t });
+  });
+  const reviewCard = $("#review-card");
+  if (reviewCard) reviewCard.addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-u-field]");
+    if (!chip) return;
+    e.preventDefault();
+    applyUncertain(chip.getAttribute("data-u-field"), chip.getAttribute("data-u-val"));
+  });
+
+  /* --- AI connection, coverage, status --- */
+  const aiStrip = $("#ai-strip");
+  if (aiStrip) aiStrip.addEventListener("click", openAiDialog);
+  const aiMore = $("#btn-ai-more");
+  if (aiMore) aiMore.addEventListener("click", () => {
+    closeMore();
+    openAiDialog();
+  });
+  const aiForm = $("#ai-form");
+  if (aiForm) aiForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    Object.assign(AI, readAiForm());
+    saveAI();
+    AI_LAST_ERROR = "";
+    renderAiSettings();
+    $("#ai-dialog").close();
+    toast("✓ AI settings saved on this device");
+  });
+  const aiProvider = $("#ai-provider");
+  if (aiProvider) aiProvider.addEventListener("change", () => {
+    AI.provider = aiProvider.value;
+    if (AI.provider !== "custom") AI.base = "";
+    renderAiSettings();
+  });
+  const aiAreas = $("#ai-areas");
+  if (aiAreas) aiAreas.addEventListener("change", (e) => {
+    const box = e.target.closest("[data-area]");
+    if (!box) return;
+    setAiArea(box.getAttribute("data-area"), box.checked);
+    saveAI();
+    renderAiAreas();
+    renderAiStrip();
+  });
+  const aiForget = $("#btn-ai-forget");
+  if (aiForget) aiForget.addEventListener("click", () => {
+    AI.key = "";
+    saveAI();
+    AI_LAST_ERROR = "";
+    renderAiSettings();
+    toast("Key forgotten — this device has no model attached", "ok");
+  });
+  const aiTest = $("#btn-ai-test");
+  if (aiTest) aiTest.addEventListener("click", testAiConnection);
+  const aiInstr = $("#btn-instr");
+  if (aiInstr) aiInstr.addEventListener("click", proposeChange);
+  const aiDialog = $("#ai-dialog");
+  if (aiDialog) aiDialog.addEventListener("close", () => {
+    // A test installs the key temporarily; closing puts the saved one back.
+    pushProvider();
+    renderAiStrip();
+  });
 
   // purchases filters
   let debounce;
@@ -1227,6 +2110,53 @@ function bindAll() {
       loadPurchases();
     } catch (err) { toast(err.message, "err"); }
   });
+
+  /* --- money in: the list --- */
+  let incDebounce;
+  $("#income-q").addEventListener("input", (e) => {
+    clearTimeout(incDebounce);
+    const v = e.target.value.trim();
+    incDebounce = setTimeout(() => { state.income.q = v; state.income.page = 1; loadIncome(); }, 300);
+  });
+  $("#income-month").addEventListener("change", (e) => {
+    state.income.month = e.target.value; state.income.page = 1; loadIncome();
+  });
+  $("#income-reset").addEventListener("click", () => {
+    state.income = { q: "", month: "", page: 1 };
+    $("#income-q").value = "";
+    $("#income-month").value = "";
+    loadIncome();
+  });
+  $("#income-prev").addEventListener("click", () => { state.income.page--; loadIncome(); });
+  $("#income-next").addEventListener("click", () => { state.income.page++; loadIncome(); });
+  $("#btn-income-add").addEventListener("click", openIncomeDialog);
+  $("#income-form").addEventListener("submit", submitIncome);
+  $("#income-body").addEventListener("click", async (e) => {
+    const del = e.target.closest("[data-inc-del]");
+    if (!del) return;
+    if (!confirm("Delete this money-in record?")) return;
+    try {
+      await api(`/api/income/${del.dataset.incDel}`, { method: "DELETE" });
+      toast("Money in deleted");
+      refreshMeta();
+      loadIncome();
+    } catch (err) { toast(err.message, "err"); }
+  });
+
+  /* --- money in: statement ingest (read → tick → record) --- */
+  $("#btn-stmt-csv").addEventListener("click", () => $("#stmt-csv").click());
+  $("#btn-stmt-img").addEventListener("click", () => $("#stmt-img").click());
+  $("#stmt-csv").addEventListener("change", (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) readFileText(f, (txt) => { $("#stmt-text").value = txt; });
+  });
+  $("#stmt-img").addEventListener("change", (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) readShot(f);
+  });
+  $("#btn-stmt-read").addEventListener("click", readStatement);
+  $("#btn-stmt-record").addEventListener("click", recordStatement);
+  $("#btn-stmt-clear").addEventListener("click", clearStatement);
 
   // budget
   $("#b-year").addEventListener("change", (e) => { state.budget.year = Number(e.target.value); state.budget.month = Number($("#b-month").value); loadBudget(); });
@@ -1312,6 +2242,7 @@ async function init() {
   }
   if (OFFLINE_ENGINE) showOfflineBadge();
   loadProfile();
+  loadAI();
   applyTheme(currentTheme(), false);
   renderProfile();
   renderWelcome();
@@ -1319,6 +2250,7 @@ async function init() {
   populateFilters();
   populateBranches();
   bindAll();
+  renderAiStrip();
   initInstall();
 
   // prefetch credit cache for the pay dialog
@@ -1333,7 +2265,7 @@ async function init() {
     const act = new URLSearchParams(location.search).get("action");
     if (act === "new") setTimeout(() => openEntryDialog(), 600);
     // deep link: /app/#purchases, /app/#credits, ... (also handy for previews)
-    const VIEWS = ["dashboard", "purchases", "credits", "analytics", "budget", "branches"];
+    const VIEWS = ["dashboard", "purchases", "income", "credits", "analytics", "budget", "branches"];
     const h = (location.hash || "").replace("#", "");
     if (VIEWS.includes(h)) switchView(h);
   } catch (e) { /* ignore */ }

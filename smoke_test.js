@@ -42,6 +42,7 @@ class El {
   setAttribute(k, v) { this._attrs[k] = String(v); this[k] = String(v); }
   getAttribute(k) { return k in this._attrs ? this._attrs[k] : null; }
   removeAttribute(k) { delete this._attrs[k]; delete this[k]; }
+  reset() { this.value = ""; }   // HTMLFormElement.reset(), as the stub's "form"
   get innerHTML() { return this._html; }
   set innerHTML(v) {
     this._html = String(v);
@@ -81,7 +82,11 @@ function makeDocument() {
     body: new El("body", null),
     documentElement: new El("html", null),
     querySelector: (sel) => (/theme-color/.test(String(sel)) ? metaTheme : make(sel)),
-    querySelectorAll: () => [new El("div", null)],
+    /* recordStatement() ticks real checkboxes; the stub hands back whatever
+       the test staged in global.__stmtTicks instead of a parsed DOM. */
+    querySelectorAll: (sel) => (String(sel).includes(".stmt-tick")
+      ? (global.__stmtTicks || [])
+      : [new El("div", null)]),
     createElement: (t) => new El(t, null),
     addEventListener() {},
   };
@@ -113,10 +118,15 @@ module.exports = {
   get META() { return META; },
   get state() { return state; },
   init, switchView, loadDashboard, loadPurchases, loadCredits,
-  loadAnalytics, loadBudget, loadBranches,
-  openEntryDialog, openPayDialog, updateCreditMode, updateLiveBox,
-  submitEntry, submitPay, recommendedRows, saveBudget, addBranch, refreshMeta,
+  loadAnalytics, loadBudget, loadBranches, loadIncome,
+  openEntryDialog, openPayDialog, openIncomeDialog, updateCreditMode, updateLiveBox,
+  submitEntry, submitPay, submitIncome, recommendedRows, saveBudget, addBranch, refreshMeta,
+  readStatement, renderStatement, recordStatement, clearStatement,
   calcEval, calcPush, CALC_KEYS,
+  runScan, renderReview, applyUncertain, fillEntryDraft, resetScan, scanOffline,
+  aiConfigured, aiStatus, aiAllows, setAiArea, aiScopeSummary,
+  renderAiStrip, renderAiSettings, renderAiAreas, aiExtractRequest, aiBuildContext,
+  loadAI, saveAI,
   daysSince, ageTone, agePill, buildAlerts, renderAlerts, updateCreditBadge,
   applyTheme, currentTheme, toggleTheme,
 };
@@ -169,7 +179,7 @@ async function runMode(mode) {
     return m.branches.length >= 1 && p.rows.length === 0;
   });
 
-  for (const v of ["dashboard", "purchases", "credits", "analytics", "budget", "branches"]) {
+  for (const v of ["dashboard", "purchases", "income", "credits", "analytics", "budget", "branches"]) {
     await check(mode + `: view '${v}' renders`, async () => {
       await pw.switchView(v);
       return !get("view-" + v).classList.contains("hidden");
@@ -461,6 +471,207 @@ async function runMode(mode) {
     ["2", "x²", "x²", "="].forEach((k) => pw.calcPush(k));
     return get("calc-display").textContent === "16";
   });
+
+  // ---- capture → extract → confirm (the model proposes, a human confirms) ----
+  await check(mode + ": scan from text fills the purchase form", async () => {
+    pw.openEntryDialog();
+    const ok = await pw.runScan({ text: "Ceda Industrial Supplies\n2026-09-22\nDTF Powder 200 bag 21600\nCredit" });
+    return ok &&
+      get("f-dist").value === "Ceda Industrial Supplies" &&
+      get("f-product").value === "DTF Powder" &&
+      Number(get("f-qty").value) === 200 &&
+      Number(get("f-total").value) === 21600 &&
+      get("f-method").value === "Credit" &&
+      get("f-date").value === "2026-09-22" &&
+      get("scan-err").textContent === "" &&
+      pw.state.scanQueue.length === 0;
+  });
+  await check(mode + ": a scan that misses key facts raises a review card", async () => {
+    pw.openEntryDialog();
+    const ok = await pw.runScan({ text: "DTF Powder 200 21600" });
+    const card = get("review-card");
+    const html = card.innerHTML;
+    return ok && !card.classList.contains("hidden") &&
+      html.includes("Date") && html.includes("Distributor") &&
+      html.includes("Paid via") && html.includes("Unit");
+  });
+  await check(mode + ": confirming a question fills the field and clears the row", () => {
+    const applied = pw.applyUncertain("distributor", "Ceda Industrial Supplies");
+    return applied &&
+      get("f-dist").value === "Ceda Industrial Supplies" &&
+      !get("review-card").innerHTML.includes("Distributor");
+  });
+  await check(mode + ": an option chip can answer for the item line", () => {
+    const applied = pw.applyUncertain("items[0].unit", "roll");
+    return applied && get("f-unit").value === "roll" &&
+      !get("review-card").innerHTML.includes("Unit");
+  });
+  await check(mode + ": a scan that finds nothing reports it instead of guessing", async () => {
+    pw.openEntryDialog();
+    const ok = await pw.runScan({ text: "" });
+    return !ok && get("scan-err").textContent.length > 0;
+  });
+  await check(mode + ": a multi-line slip queues the extra items", async () => {
+    pw.openEntryDialog();
+    await pw.runScan({ text: "2026-09-01\nAlpha Inks\nInk Set 10 set 9000\nFoil 4 pack 1200" });
+    return get("f-product").value === "Ink Set" &&
+      Number(get("f-total").value) === 9000 &&
+      pw.state.scanQueue.length === 1;
+  });
+  await check(mode + ": queued lines save one at a time through the normal path", async () => {
+    const tag = stamp + "-scan";
+    get("f-branch").value = "1";
+    get("f-memo").value = tag;
+    await pw.submitEntry({ preventDefault() {} });
+    await sleep(300);
+    const between = get("f-product").value === "Foil" && pw.state.scanQueue.length === 0;
+    await pw.submitEntry({ preventDefault() {} });
+    await sleep(350);
+    const rows = (await apiGet("/api/purchases?page_size=200")).rows.filter((r) => r.memo === tag);
+    const byProduct = rows.map((r) => r.product).sort().join(",");
+    return between && rows.length === 2 && byProduct === "Foil,Ink Set" &&
+      rows.every((r) => Number(r.total) > 0 && Number(r.quantity) > 0) &&
+      pw.state.scanQueue.length === 0;
+  });
+
+  // ---- AI connection, coverage, status ----
+  await check(mode + ": AI status strip is on every screen", () => {
+    const txt = get("ai-strip-txt").textContent;
+    return txt.startsWith("AI ·") &&
+      get("ai-strip-scope").textContent.includes("capture") &&
+      get("ai-dot").className.includes("off");
+  });
+  await check(mode + ": coverage defaults — capture and catalogue on, the rest off", () =>
+    pw.aiAllows("capture") && pw.aiAllows("catalogue") &&
+    !pw.aiAllows("money") && !pw.aiAllows("app") &&
+    pw.aiScopeSummary() === "capture · catalogue");
+  await check(mode + ": settings lists free providers and every coverage area", () => {
+    pw.renderAiSettings();
+    return get("ai-provider").innerHTML.includes("groq") &&
+      get("ai-provider").innerHTML.includes("gemini") &&
+      get("ai-provider").innerHTML.includes("openrouter") &&
+      get("ai-model-list").innerHTML.length > 0 &&
+      get("ai-areas").innerHTML.includes("Receipt &amp; slip capture") &&
+      get("ai-areas").innerHTML.split("data-area=").length === 5 &&
+      get("ai-instr").classList.contains("hidden");
+  });
+  await check(mode + ": coverage decides what context travels with a scan", async () => {
+    pw.setAiArea("catalogue", true);
+    const withCtx = await pw.aiBuildContext();
+    pw.setAiArea("catalogue", false);
+    const without = await pw.aiBuildContext();
+    pw.setAiArea("catalogue", true);
+    return withCtx.includes("My items") && without === "";
+  });
+  await check(mode + ": turning capture off hides the scan bar", () => {
+    pw.setAiArea("capture", false);
+    pw.openEntryDialog();
+    const hidden = get("scan-bar").classList.contains("hidden");
+    pw.setAiArea("capture", true);
+    pw.openEntryDialog();
+    return hidden && !get("scan-bar").classList.contains("hidden");
+  });
+  await check(mode + ": a pasted key installs a device-side connection only", () => {
+    get("ai-provider").value = "custom";
+    get("ai-base").value = "http://127.0.0.1:9/v1";
+    get("ai-key").value = "sk-test-device";
+    get("ai-model").value = "test-model";
+    get("ai-form").dispatch("submit");
+    const stored = JSON.parse(localStorage.getItem("pwbudget.ai.v1") || "{}");
+    return pw.aiConfigured() && stored.key === "sk-test-device" &&
+      PWDB.providerSet() === true && pw.aiStatus().tone === "on";
+  });
+  await check(mode + ": an unreachable model falls back instead of failing", async () => {
+    // The provider is installed but its endpoint is dead, so db.js must not
+    // throw and must not hand back an empty form: the built-in rules answer,
+    // and the strip owns the bad news instead of the dialog.
+    const note = "Ceda\nDTF Powder 2 bags 21600\npaid Cash\n22/09/2026";
+    const r = await pw.aiExtractRequest({ text: note });
+    return r && r.source === "heuristic" &&
+      r.draft.distributor === "Ceda" && r.draft.items.length === 1 &&
+      r.draft.items[0].total_amount === 21600 && r.draft.payment_method === "Cash" &&
+      pw.aiStatus().tone === "bad" &&
+      pw.aiStatus().detail.includes("built-in rules");
+  });
+  await check(mode + ": forgetting the key detaches the model", () => {
+    get("ai-key").value = "";
+    get("ai-form").dispatch("submit");
+    return !pw.aiConfigured() && PWDB.providerSet() === false &&
+      pw.aiStatus().tone === "off";
+  });
+
+  // ---- money in: a person records it, or a statement proposes it ----
+  await check(mode + ": money-in dialog opens with a branch and today", () => {
+    pw.openIncomeDialog();
+    return get("i-branch").value !== "" &&
+      /^\d{4}-\d{2}-\d{2}$/.test(get("i-date").value);
+  });
+  get("i-date").value = "2026-09-27";
+  get("i-branch").value = "1";
+  get("i-amount").value = "4800";
+  get("i-source").value = "Smoke takings " + stamp;
+  get("i-ref").value = "SMK0";
+  get("i-memo").value = stamp;
+  await check(mode + ": money in recorded through the dialog", async () => {
+    await pw.submitIncome({ preventDefault() {} });
+    await sleep(300);
+    return get("i-err").textContent === "";
+  });
+  await check(mode + ": money in persisted with its amount", async () => {
+    const rows = (await apiGet("/api/income?page_size=50")).rows;
+    return rows.some((r) => (r.memo || "").includes(stamp) && Number(r.amount) === 4800);
+  });
+  await check(mode + ": income view shows money in and what is left over", async () => {
+    await pw.switchView("income");
+    const k = get("income-kpis").innerHTML;
+    return k.includes("Money in") && k.includes("Left over") &&
+      get("income-body").innerHTML.includes("Smoke takings");
+  });
+  await check(mode + ": a statement becomes candidates, not rows", async () => {
+    get("stmt-text").value = [
+      "Date,Description,Debit,Credit,Reference",
+      "2026-09-26,Shop takings,,4800,SMK1",
+      "2026-09-26,Ceda Industrial Supplies,900,,SMK2",
+    ].join("\n");
+    await pw.readStatement();
+    await sleep(400);
+    const html = get("stmt-rows").innerHTML;
+    return !get("stmt-out").classList.contains("hidden") &&
+      html.includes("SMK1") && html.includes("SMK2") &&
+      html.includes("money out") &&
+      get("btn-stmt-record").disabled === false;
+  });
+  await check(mode + ": ticking a candidate records it as money in", async () => {
+    global.__stmtTicks = [{ checked: true, dataset: { i: "0" } }];
+    await pw.recordStatement();
+    await sleep(400);
+    global.__stmtTicks = [];
+    const rows = (await apiGet("/api/income?page_size=50")).rows;
+    return rows.some((r) => r.reference === "SMK1" && Number(r.amount) === 4800);
+  });
+  await check(mode + ": capture coverage also gates the statement importer", async () => {
+    pw.setAiArea("capture", false);
+    await pw.loadIncome();
+    const hidden = get("stmt-card").classList.contains("hidden");
+    pw.setAiArea("capture", true);
+    await pw.loadIncome();
+    return hidden && !get("stmt-card").classList.contains("hidden");
+  });
+
+  // ---- cleanup this mode's scan purchases (they are written after the
+  //      earlier cleanup pass, so they need their own) ----
+  const leftovers = await apiGet("/api/purchases?page_size=200");
+  for (const r of leftovers.rows.filter((x) => (x.memo || "").includes(stamp))) {
+    if (mode === "offline") PWDB.request("DELETE", `/api/purchases/${r.id}`, {}, {});
+    else await fetch(BASE + `/api/purchases/${r.id}`, { method: "DELETE" });
+  }
+  const incLeft = await apiGet("/api/income?page_size=200");
+  for (const r of incLeft.rows.filter((x) =>
+    (x.memo || "").includes(stamp) || (x.source || "").includes(stamp) ||
+    String(x.reference || "").startsWith("SMK"))) {
+    if (mode === "offline") PWDB.request("DELETE", `/api/income/${r.id}`, {}, {});
+    else await fetch(BASE + `/api/income/${r.id}`, { method: "DELETE" });
+  }
 
   fs.unlinkSync(path.join(__dirname, `_app_${mode}.js`));
   return creditId;
