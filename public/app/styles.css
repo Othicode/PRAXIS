@@ -63,6 +63,14 @@
   --safe-b: env(safe-area-inset-bottom, 0px);
   --safe-t: env(safe-area-inset-top, 0px);
   --gutter: 14px;
+  /* Horizontal inset. Turned sideways, a notched phone eats ~45px of each
+     side; every surface that runs to the screen edge pads with max(gutter,
+     safe-area) so nothing hides behind the camera. In portrait (and on every
+     phone without a notch) these resolve to exactly --gutter — no change. */
+  --safe-l: env(safe-area-inset-left, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+  --gutter-l: max(var(--gutter), var(--safe-l));
+  --gutter-r: max(var(--gutter), var(--safe-r));
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -90,7 +98,7 @@ input, select, textarea { font-family: var(--font); font-size: 16px; }
   background: var(--bar);
   border-bottom: 1px solid var(--line2);
   display: flex; align-items: center; gap: 10px;
-  padding: max(9px, var(--safe-t)) var(--gutter) 9px;
+  padding: max(9px, var(--safe-t)) var(--gutter-r) 9px var(--gutter-l);
   box-shadow: 0 12px 30px -18px rgba(0,0,0,.9);
 }
 .brand { display: flex; align-items: center; gap: 9px; min-width: 0; flex: 0 1 auto; }
@@ -105,9 +113,12 @@ input, select, textarea { font-family: var(--font); font-size: 16px; }
 .brand-text strong { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .brand-text span { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* shrinkable on a narrow phone: at 320px with the Offline badge up, the brand
+   cannot give any more and these controls must yield instead of pushing the
+   page sideways. min-width:0 lets the branch select below absorb the squeeze. */
 .top-actions {
   display: flex; align-items: center; gap: 8px;
-  margin-left: auto; flex: 0 0 auto; flex-wrap: nowrap;
+  margin-left: auto; flex: 0 1 auto; min-width: 0; flex-wrap: nowrap;
 }
 
 /* branch switcher — shrinks instead of overflowing on narrow phones */
@@ -119,7 +130,9 @@ input, select, textarea { font-family: var(--font); font-size: 16px; }
 }
 .branch-pick select {
   border: 1px solid var(--line2); border-radius: 9px; padding: 7px 8px;
-  font: inherit; font-size: 13px; background: var(--field); color: var(--ink);
+  /* 16px, not 13: anything smaller makes Safari on iOS jump the viewport in
+     when the owner taps the switcher. The compact size returns on desktop. */
+  font: inherit; font-size: 16px; background: var(--field); color: var(--ink);
   min-width: 0; width: clamp(84px, 26vw, 150px);
   text-overflow: ellipsis; overflow: hidden;
 }
@@ -194,7 +207,7 @@ input, select, textarea { font-family: var(--font); font-size: 16px; }
 /* primary action: a thumb-reachable FAB on phones */
 #btn-new {
   position: fixed; z-index: 300;
-  right: var(--gutter);
+  right: var(--gutter-r);
   bottom: calc(var(--tabbar-h) + var(--safe-b) + 14px);
   width: 58px; height: 58px; padding: 0;
   border-radius: 50%; font-size: 26px; line-height: 1;
@@ -215,7 +228,8 @@ input, select, textarea { font-family: var(--font); font-size: 16px; }
 .nav {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
   display: grid; grid-template-columns: repeat(5, 1fr);
-  gap: 2px; padding: 6px 4px calc(6px + var(--safe-b));
+  gap: 2px;
+  padding: 6px max(4px, var(--safe-r)) calc(6px + var(--safe-b)) max(4px, var(--safe-l));
   background: var(--bar); backdrop-filter: blur(14px);
   border-top: 1px solid var(--line2);
   box-shadow: 0 -12px 30px -20px rgba(0,0,0,.95);
@@ -261,7 +275,14 @@ input, select, textarea { font-family: var(--font); font-size: 16px; }
   background: linear-gradient(180deg, var(--panel2), var(--panel-deep));
   border-top: 1px solid var(--line2);
   border-radius: 20px 20px 0 0;
-  padding: 8px var(--gutter) calc(14px + var(--safe-b));
+  padding: 8px var(--gutter-r) calc(14px + var(--safe-b)) var(--gutter-l);
+  /* seven entries are ~430px tall: on a phone held sideways that is taller
+     than the screen, and without this the first ones sit off the top with no
+     way to reach them. */
+  max-height: calc(100vh - 10px);
+  max-height: calc(100dvh - 10px);
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   transform: translateY(102%); visibility: hidden;
   transition: transform .24s cubic-bezier(.2,.9,.3,1), visibility .24s;
   box-shadow: 0 -24px 60px -20px rgba(0,0,0,.9);
@@ -285,8 +306,8 @@ input, select, textarea { font-family: var(--font); font-size: 16px; }
 
 /* ============ Layout ============ */
 .main {
-  padding: var(--gutter) var(--gutter)
-           calc(var(--tabbar-h) + var(--safe-b) + 86px);
+  padding: var(--gutter) var(--gutter-r)
+           calc(var(--tabbar-h) + var(--safe-b) + 86px) var(--gutter-l);
 }
 .view { animation: fade .22s ease; }
 @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; } }
@@ -629,16 +650,24 @@ dialog {
   position: fixed; inset: 0;
   margin: auto 0 0 0;
   width: auto; max-width: none;
-  height: auto; max-height: 92vh; overflow-y: auto;
+  height: auto;
+  /* dvh tracks the URL bar as Safari hides and shows it; plain vh is the
+     *tall* viewport, so a sheet sized in vh can overrun the visible screen */
+  max-height: 92vh; max-height: 92dvh;
+  overflow-y: auto;
   border: 1px solid var(--line2); border-bottom: 0;
   border-radius: 20px 20px 0 0;
-  padding: 0;
+  /* The SHEET owns the padding. It used to sit on the three forms only, which
+     left every dialog without a form wrapper — Money in, AI settings, Your
+     data — flush against the screen edge with no room for the home bar. */
+  padding: 16px max(16px, var(--safe-r)) calc(18px + var(--safe-b)) max(16px, var(--safe-l));
   background: linear-gradient(165deg, var(--panel), var(--panel-deep)); color: var(--ink);
   box-shadow: 0 -24px 60px -18px rgba(0,0,0,.9);
   -webkit-overflow-scrolling: touch;
 }
 dialog::backdrop { background: rgba(0,0,0,.62); backdrop-filter: blur(3px); }
-#entry-form, #pay-form, #profile-form { padding: 16px 16px calc(18px + var(--safe-b)); }
+/* a form inside a dialog is a transparent wrapper — it carries no padding */
+#entry-form, #pay-form, #profile-form, #income-form, #ai-form { padding: 0; }
 .dialog-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 10px; }
 .dialog-head h3 { font-size: 17px; font-weight: 800; }
 .form-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
@@ -662,7 +691,9 @@ dialog::backdrop { background: rgba(0,0,0,.62); backdrop-filter: blur(3px); }
   width: 100%; min-height: 80px; resize: vertical; padding: 11px 12px;
   color: var(--ink); background: var(--field);
   border: 1px solid var(--line); border-radius: 10px;
-  font: inherit; font-size: 13px; line-height: 1.5;
+  /* 16px on the phone: iOS Safari zooms the viewport into any control under
+     16px, which throws the sheet off-screen mid-typing. Desktop keeps 13px. */
+  font: inherit; font-size: 16px; line-height: 1.5;
 }
 .paste-box textarea:focus-visible {
   outline: none; border-color: var(--gold);
@@ -810,7 +841,7 @@ dialog::backdrop { background: rgba(0,0,0,.62); backdrop-filter: blur(3px); }
 /* Both sit under the header on phones — the bottom is reserved for the
    tab bar and the two floating buttons. */
 .toast {
-  position: fixed; top: calc(8px + var(--safe-t)); left: var(--gutter); right: var(--gutter);
+  position: fixed; top: calc(8px + var(--safe-t)); left: var(--gutter-l); right: var(--gutter-r);
   z-index: 400;
   background: #1c1c24; color: var(--ink); border: 1px solid var(--line2);
   padding: 13px 17px; border-radius: 12px;
@@ -824,7 +855,7 @@ dialog::backdrop { background: rgba(0,0,0,.62); backdrop-filter: blur(3px); }
 /* persistent, tappable — parked above the tab bar, clear of the FAB */
 .update-banner {
   position: fixed; z-index: 95;
-  left: var(--gutter); right: calc(var(--gutter) + 66px);
+  left: var(--gutter-l); right: calc(var(--gutter-r) + 66px);
   bottom: calc(var(--tabbar-h) + var(--safe-b) + 14px);
   background: var(--gold-grad); color: #191301;
   border: none; cursor: pointer; text-align: left;
@@ -840,7 +871,7 @@ dialog::backdrop { background: rgba(0,0,0,.62); backdrop-filter: blur(3px); }
    alarm, and it stays up until the device can save again */
 .storage-banner {
   position: fixed; z-index: 96;
-  left: var(--gutter); right: calc(var(--gutter) + 66px);
+  left: var(--gutter-l); right: calc(var(--gutter-r) + 66px);
   bottom: calc(var(--tabbar-h) + var(--safe-b) + 14px);
   background: #7f1d1d; color: #fee2e2;
   border: 1px solid rgba(248,113,113,.45); cursor: pointer; text-align: left;
@@ -869,7 +900,7 @@ dialog::backdrop { background: rgba(0,0,0,.62); backdrop-filter: blur(3px); }
 /* ============ Calculator widget ============ */
 .calc-fab {
   position: fixed; z-index: 300;
-  right: calc(var(--gutter) + 6px);
+  right: calc(var(--gutter-r) + 6px);
   bottom: calc(var(--tabbar-h) + var(--safe-b) + 84px);
   width: 48px; height: 48px; border-radius: 50%; border: none; cursor: pointer;
   background: var(--gold-grad);
@@ -886,15 +917,20 @@ body.calc-open #btn-new { opacity: 0; pointer-events: none; }
 
 .calc-shell {
   position: fixed; z-index: 290;
-  left: 0; right: 0; bottom: calc(var(--tabbar-h) + var(--safe-b));
+  left: var(--safe-l); right: var(--safe-r); bottom: calc(var(--tabbar-h) + var(--safe-b));
   background: var(--panel); border: 1px solid var(--line2);
   border-bottom: 0; border-radius: 20px 20px 0 0;
   box-shadow: 0 -24px 60px -18px rgba(0,0,0,.9);
   opacity: 0; transform: translateY(24px); pointer-events: none;
   transition: all .22s cubic-bezier(.2,.9,.3,1.1);
-  overflow: hidden; display: flex; flex-direction: column; max-height: 76vh;
+  overflow: hidden; display: flex; flex-direction: column;
+  max-height: 76vh; max-height: 76dvh;
 }
 .calc-shell.open { opacity: 1; transform: translateY(0); pointer-events: auto; }
+/* the keypad is the only flexible part: on a phone held sideways the sheet is
+   shorter than the keys, so the keys scroll while head, screen and foot stay */
+.calc-head, .calc-screen, .calc-foot { flex: 0 0 auto; }
+.calc-keys { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .calc-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 11px 13px; background: var(--bg); color: var(--gold-hi); font-weight: 700; font-size: 13px;
@@ -938,6 +974,28 @@ body.calc-open #btn-new { opacity: 0; pointer-events: none; }
 }
 
 /* ============================================================
+   Thumbs, not cursors. On a touch screen every control that triggers an
+   action reaches 44px (Apple HIG / Material) — the size this app already
+   uses for .btn, .nav-btn (50px), the calculator keys (46px) and .check.
+   The width catches a phone in portrait; (pointer: coarse) catches a tablet
+   or a phone held sideways, which lands in the ≥900px desktop layout.
+   ============================================================ */
+@media (max-width: 899px), (pointer: coarse) {
+  /* every field and picker, whatever padding its own rule styled it with
+     (the header switcher is 35px, the date filters 43px) */
+  input:not([type="checkbox"]):not([type="radio"]), select { min-height: 44px; }
+  .btn.small { min-height: 44px; }                         /* dialog ✕, CSV, profile Open */
+  .icon-btn, .row-actions .icon-btn { min-height: 44px; }  /* row Pay/Move/Delete, sheet ✕ */
+  .seg-btn { min-height: 44px; }                           /* appearance switch */
+  .u-chip { min-height: 44px; }                            /* review-card option chips */
+  .ai-strip { min-height: 44px; }                          /* the AI status bar */
+  .calc-head-right .btn { min-height: 44px; }              /* calculator head controls */
+  .stmt-row { min-height: 44px; }                          /* statement candidate rows */
+  .theme-btn { width: 44px; height: 44px; }                /* header theme switch */
+  .profile-chip { min-height: 44px; }                      /* header identity pill */
+}
+
+/* ============================================================
    Medium screens (large phones / tablets held in portrait)
    ============================================================ */
 @media (min-width: 560px) {
@@ -975,7 +1033,7 @@ body.calc-open #btn-new { opacity: 0; pointer-events: none; }
   .topbar {
     display: flex; flex-wrap: wrap; align-items: center;
     gap: 12px 16px;
-    padding: 11px 24px 0;
+    padding: 11px var(--gutter-r) 0 var(--gutter-l);
   }
   .brand-mark { width: 40px; height: 40px; border-radius: 12px; font-size: 15px; }
   .brand-text strong, .brand-text span { max-width: 220px; }
@@ -1016,7 +1074,7 @@ body.calc-open #btn-new { opacity: 0; pointer-events: none; }
     position: static; margin-left: 6px; box-shadow: 0 0 0 2px rgba(7,7,10,.92);
   }
 
-  .main { padding: 24px; max-width: 1320px; margin: 0 auto; }
+  .main { padding: var(--gutter) var(--gutter-r) var(--gutter) var(--gutter-l); max-width: 1320px; margin: 0 auto; }
   .view > * + * { margin-top: 16px; }
   .grid-3 { grid-template-columns: repeat(3, 1fr); }
   .span-2 { grid-column: span 2; }
@@ -1104,30 +1162,36 @@ body.calc-open #btn-new { opacity: 0; pointer-events: none; }
   dialog {
     inset: 0; margin: auto;
     width: min(560px, 94vw); max-width: none;
-    height: auto; max-height: 88vh;
+    height: auto; max-height: 88vh; max-height: 88dvh;
     border: 1px solid var(--line2); border-radius: 16px;
     box-shadow: 0 28px 80px -18px rgba(0,0,0,.85);
+    padding: 20px 22px 18px;
   }
-  #entry-form, #pay-form, #profile-form { padding: 20px 22px 18px; }
+  #entry-form, #pay-form, #profile-form, #income-form, #ai-form { padding: 0; }
   .dialog-foot { justify-content: flex-end; }
   .dialog-foot .btn { flex: 0 0 auto; }
   .live { display: flex; gap: 26px; flex-wrap: wrap; }
 
   .toast {
-    top: auto; bottom: 26px; left: auto; right: 26px;
+    top: auto; bottom: 26px; left: auto; right: max(26px, var(--safe-r));
     max-width: 340px; transform: translateY(10px);
   }
   .toast.show { transform: translateY(0); }
-  .update-banner { left: auto; right: 26px; bottom: 76px; max-width: 340px; }
+  .update-banner { left: auto; right: max(26px, var(--safe-r)); bottom: 76px; max-width: 340px; }
+  /* The alarm sits in the same right-hand column. It needs its own desktop
+     slot: the phone rule above measures itself against a tab bar that does not
+     exist here, and without this it would span the whole window. */
+  .storage-banner { left: auto; right: max(26px, var(--safe-r)); bottom: 76px; max-width: 340px; }
+  .update-banner:not(.hidden) + .storage-banner { bottom: 136px; }
 
   .calc-fab {
-    right: 18px; bottom: 18px;
+    right: max(18px, var(--safe-r)); bottom: 18px;
     width: 56px; height: 56px; font-size: 24px;
   }
   body.calc-open .calc-fab { opacity: 1; pointer-events: auto; }
   body.calc-open #btn-new { opacity: 1; pointer-events: auto; }
   .calc-shell {
-    left: auto; right: 18px; bottom: 86px;
+    left: auto; right: max(18px, var(--safe-r)); bottom: 86px;
     width: 300px; max-width: calc(100vw - 28px); max-height: none;
     border: 1px solid var(--line2); border-radius: 18px;
     box-shadow: 0 24px 60px -18px rgba(0,0,0,.8);
@@ -1321,7 +1385,7 @@ html[data-theme="light"] .ck.eq { background: var(--gold); color: #fffaf0; }
   width: 100%; min-height: 92px; resize: vertical; padding: 11px 12px;
   color: var(--ink); background: var(--field);
   border: 1px solid var(--line); border-radius: 10px;
-  font: inherit; font-size: 13px; line-height: 1.5;
+  font: inherit; font-size: 16px; line-height: 1.5;   /* see .paste-box textarea */
 }
 .stmt-text:focus-visible {
   outline: none; border-color: var(--gold);
@@ -1368,4 +1432,18 @@ html[data-theme="light"] .ck.eq { background: var(--gold); color: #fffaf0; }
   .stmt-row { grid-template-columns: auto auto auto 1fr; }
   .stmt-amt { grid-column: 4; text-align: right; }
   .stmt-ref { grid-column: 2 / -1; }
+}
+
+/* ---- type size follows the pointer, not the screen ----
+   16px is the default everywhere: Safari on iOS jumps the viewport into any
+   control under 16px when it takes focus, which throws a bottom sheet
+   off-screen mid-typing. A mouse-driven desktop opts into the compact size.
+   Last in the file so source order beats the base rules declared earlier. */
+@media (min-width: 900px) and (pointer: fine) {
+  .branch-pick select, .paste-box textarea, .stmt-text { font-size: 13px; }
+}
+@media (min-width: 900px) and (pointer: coarse) {
+  /* a tablet or a phone held sideways also lands in the ≥900px layout, but
+     its screen is still being poked — keep the phone type size there */
+  input, select, textarea { font-size: 16px; }
 }

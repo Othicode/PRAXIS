@@ -158,7 +158,7 @@ the stub `El`, income cleanup loop.
 
 ---
 
-### Phase 0 — your data, out loud ✅ (this session, not yet committed)
+### Phase 0 — your data, out loud ✅ (this session, committed as `fb8c641`)
 
 Two halves: a write that cannot be stored must never look saved, and the owner
 must be able to take their records with them.
@@ -206,6 +206,41 @@ rolled out of the store, the banner raising then clearing itself, and
 replace the books when there is no room to store them. `FakeStorage`
 gained a `fail` flag, `El` a `click()`, and the harness exports the new
 functions. `CACHE = "pwbudget-v23"`.
+
+---
+
+### Mobile UI pass — sheets, thumbs, insets ✅ (this session)
+
+No browser is attached to this session (§5), so this was found by parsing
+`styles.css` rather than by looking at it. Four defects:
+
+| Was broken on a phone | Fix |
+|---|---|
+| `dialog { padding: 0 }` sat on the *forms* — Money in, AI settings and **Your data** rendered flush to the screen edge with no room for the home bar | the sheet owns the padding, the forms are `padding: 0`, so a dialog with no form wrapper is indented like one with |
+| The More sheet is ~430px tall and had no `max-height`: held sideways its first entries sat off the top, unreachable | `max-height: calc(100dvh - 10px)` + scroll, `overscroll-behavior: contain` |
+| The keypad is `overflow: hidden` inside a `76vh` shell — a phone sideways lost its bottom keys | keys are the only flexible child (`flex: 1 1 auto; min-height: 0; overflow-y: auto`), head/screen/foot pinned |
+| `.branch-pick select` and both statement textareas were 13px, which makes **Safari on iOS jump the viewport** into them on focus | 16px everywhere; 13px comes back only at `≥900px and (pointer: fine)` |
+
+Also: `92vh`/`76vh` → `dvh` (plain `vh` is the *tall* viewport, so a sheet can
+overrun the screen while Safari's bar is showing); `--safe-l`/`--safe-r` folded
+into `--gutter-l`/`--gutter-r` on the header, tab bar, main, both sheets, the
+toast, the banners and the two FABs, so a notched phone held sideways doesn't
+hide them behind the camera (no-ops in portrait); `.top-actions` made shrinkable
+— at 320px with the Offline badge up, the header pushed the page sideways; and
+`.storage-banner` given its own desktop slot, since it had inherited a tab-bar
+offset for a layout that has no tab bar.
+
+**44px is the floor on touch** — `@media (max-width: 899px), (pointer: coarse)`
+lifts `.btn.small`, the row Pay/Move/Delete icons, `.seg-btn`, the review chips,
+the AI strip, the calculator head buttons, statement rows, the theme switch and
+the identity pill to 44px, and puts `min-height: 44px` under every field and
+picker. The rest of the app already sat at 44–58px (`.btn`, `.nav-btn` 50, the
+calculator keys 46, `.check` 44) — these were the outliers. **The pointer, not
+the width, decides**, because a tablet or a phone turned sideways lands in the
+≥900px desktop layout while still being poked with a finger.
+
+`CACHE = "pwbudget-v24"`. Tests unchanged (160 audit / 165 smoke) — none of
+this is observable to them; the only proof that matters is a real handset.
 
 ---
 
@@ -271,6 +306,12 @@ The AI connection dialog is now genuinely *select provider → paste key → Sav
   "why does server mode suddenly see an empty/old store?"; the symptom is a
   handful of `PW Budget: server API unreachable` warnings. Keep read fan-out
   bounded (`pool(items, fn, 4)`).
+- **No desktop browser is attached to this session** — `browser.tabs.list()`
+  answers `[browser.disconnected]`, and repeating it does not help. Visual work
+  has to be reasoned out of the source and validated by *parsing* it (brace /
+  paren / comment balance, every declaration parses, an audit of every rule that
+  can size a control). Say plainly that nothing was seen rather than implying
+  it was; the check that still needs a handset is in §7.
 
 ---
 
@@ -334,6 +375,11 @@ The AI connection dialog is now genuinely *select provider → paste key → Sav
   is the workaround.
 - `save()` aside, no real-device check of the new Money in view has happened;
   only the headless DOM-stub smoke has.
+- **The mobile UI pass (§3) has never been seen on a handset** — it was derived
+  by parsing `styles.css`, not by rendering it. Before trusting it, look at
+  *More → Your data*, the **Money in** dialog (both used to render flush to the
+  screen edge), the **More sheet** and the **calculator** held sideways (both
+  used to clip), and tap a few controls for size.
 
 ---
 
