@@ -1,8 +1,8 @@
 # Session status — handoff notes
 
 > **Read this first when starting a new session.** It is a snapshot of where
-> work stopped, what is green, and what is left. Last updated **2026-10-04**
-> after Phase 3 landed.
+> work stopped, what is green, and what is left. Last updated **2026-10-05**:
+> Phase 3 README edits done, Phases 1–3 committed as `aa6eb20`.
 >
 > The product spec lives in `docs/AI_AUTOMATION_PLAN.md`; this file is only
 > about *state of the work*.
@@ -156,36 +156,19 @@ the stub `El`, income cleanup loop.
 
 ---
 
-## 4. What is NOT done (the immediate to-do)
+## 4. What was outstanding — now DONE (2026-10-05)
 
-1. **README.md still needs its Phase 3 edits.** `docs/AI_AUTOMATION_PLAN.md`
-   is fully updated; the README is not. Specifically:
-   - **Data model** (~line 168): add
-     `income  money in: date, branch, source, reference, amount, memo`.
-   - **HTTP API** (~line 186): add
-     ```
-     GET  /api/income?[branch_id&month&q&page&page_size]
-     POST /api/income     {date, branch_id, source, reference?, amount, memo?}
-     DELETE /api/income/<id>
-     ```
-   - **`source` note** (~line 206): `db.js` no longer only ever produces
-     `heuristic` — with a device key it produces `model` too (still identical
-     to a keyless `server.py`, because the audit clears the key).
-   - **Tests** (line 248): update the smoke description to mention the Money
-     in view + statement ingest; change section 5 from "**the six** constants"
-     to "**the nine**" (adds `AI_PROMPT_INSTRUCT`, `AI_PROMPT_STATEMENT_IMAGE`,
-     `AI_PROMPT_STATEMENT_TEXT_PREFIX`).
-   - **Roadmap** (line 320): drop the "Statement ingestion … (phase 3)" bullet
-     — it now ships.
-2. **Commit.** Nothing has been committed. 11 modified files + untracked
-   `fixtures/`:
-   `README.md`, `audit_calculations.js`, `docs/AI_AUTOMATION_PLAN.md`,
-   `public/app/{app.js,db.js,index.html,styles.css,sw.js}`, `server.py`,
-   `smoke_test.js`, `tools/cleanup_smoke.py`, `fixtures/`.
-   This covers **Phases 1, 2, 2b and 3 together** — the user has not asked to
-   commit yet, so confirm first.
-3. **Re-run the four test commands after any README/doc edit** (only
-   `check_static.py` really can break from doc changes, but cheap to confirm).
+1. **README Phase 3 edits — done.** Added `income` to the data model, the
+   three `/api/income` routes to the API list, a **Money in** bullet under
+   *What the boss sees*, the corrected `source` note (`db.js` can now produce
+   `model` with a device key), "**the nine** constants" in Tests §5, and the
+   shipped statement-ingestion roadmap bullet was dropped.
+2. **Committed — `aa6eb20`** *AI capture pipeline phases 1-3: ai routes,
+   slip capture, AI-native surface, income + statement ingest.*
+   13 files, 3784 insertions: the 11 modified files plus
+   `docs/SESSION_STATUS.md` and `fixtures/ai/…json`.
+3. **Tests re-run green after the doc edits** — audit 160, smoke 148,
+   `cleanup_smoke.py` clean, `check_static.py` OK.
 
 ---
 
@@ -270,6 +253,8 @@ the stub `El`, income cleanup loop.
 Other roadmap ideas in `README.md`: low-stock warnings per item, CSV export
 for the owner, PIN lock on the installed app.
 
-**Suggested first move in a new session:** finish the README edits in §4.1,
-then ask whether to commit Phases 1–3, then pick Phase 0 (backup/restore —
-the biggest real-world risk) or Phase 4.
+**Suggested first move in a new session:** pick **Phase 0** (backup/restore +
+making `db.js`'s silent `save()` quota failure loud) — the biggest real-world
+risk — or run the still-unanswered **browser CORS check** against a real
+vision provider (§7), which decides whether live capture actually works before
+Phase 4 build on top of it.
