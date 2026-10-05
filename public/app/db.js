@@ -16,6 +16,8 @@ const PAYMENT_METHODS = ["Cash", "Bank Transfer", "Mobile Money", "Credit"];
 const UNIT_SUGGESTIONS = ["bag", "roll", "pack", "set", "bottle", "kg",
   "box", "piece", "litre", "carton", "can"];
 const LS_KEY = "pwbudget.v1";
+/* One sentence, in both engines, for the one failure that used to be silent. */
+const STORAGE_FULL_ERROR = "storage is full — this change was not saved. Export a backup and free some space, then try again.";
 
 const r2 = (x) => Math.round((Number(x) || 0) * 100) / 100;
 const r1 = (x) => Math.round((Number(x) || 0) * 10) / 10;
@@ -75,9 +77,69 @@ function load() {
   }
   return DB;
 }
+/* save() used to swallow every exception, which meant a full phone reported
+   "✓ Saved" and then lost the entry on the next reload. It now records why the
+   write failed; request() turns that into a 507 and rolls the store back, so a
+   failed write can never masquerade as a saved one. */
+let SAVE_ERROR = "";      // why the last write attempt failed ("" = it stuck)
+let SAVE_ATTEMPTS = 0;    // write attempts, so a caller can tell its own write apart
+
 function save() {
-  try { globalThis.localStorage && localStorage.setItem(LS_KEY, JSON.stringify(DB)); }
-  catch (e) { /* storage full / unavailable */ }
+  SAVE_ATTEMPTS += 1;
+  SAVE_ERROR = "";
+  if (!globalThis.localStorage) return;   // e.g. Node, in the parity harness
+  try { localStorage.setItem(LS_KEY, JSON.stringify(DB)); }
+  catch (e) {
+    SAVE_ERROR = (e && e.name === "QuotaExceededError")
+      ? STORAGE_FULL_ERROR
+      : "this device refused to save the change" + (e && e.message ? ` (${e.message})` : "");
+  }
+}
+function storageStatus() {
+  return { ok: !SAVE_ERROR, error: SAVE_ERROR, full: SAVE_ERROR === STORAGE_FULL_ERROR };
+}
+/* A byte-exact copy of the store — the shape a .pwbudget backup file holds. */
+function exportData() {
+  return JSON.parse(JSON.stringify(load()));
+}
+/* Replace the store with a backup. Callers hand over an envelope they have
+   already parsed; this only accepts the offline engine's own shape, and it
+   puts the previous store back if the new one will not fit on the device. */
+function importData(data) {
+  const tables = ["branches", "distributors", "products", "purchases",
+    "income", "credit_payments", "budgets"];
+  if (!data || typeof data !== "object" || Array.isArray(data))
+    return { ok: false, error: "that file is not a PW Budget backup" };
+  for (const k of tables) {
+    if (!Array.isArray(data[k]))
+      return { ok: false, error: `that file is missing "${k}" — it is not a PW Budget backup` };
+    if (!data[k].every((r) => r && typeof r === "object" && !Array.isArray(r)))
+      return { ok: false, error: `that file has a damaged "${k}" list — it is not a PW Budget backup` };
+  }
+  if (!data.branches.length) return { ok: false, error: "that backup has no branches" };
+
+  const prev = DB;
+  let seq = toInt(data.seq, 1);
+  for (const k of tables) for (const r of data[k]) seq = Math.max(seq, toInt(r.id, 0));
+  DB = {
+    seq, version: toInt(data.version, 1),
+    branches: data.branches, distributors: data.distributors, products: data.products,
+    purchases: data.purchases, income: data.income, credit_payments: data.credit_payments,
+    budgets: data.budgets, created: String(data.created || todayISO()),
+  };
+  save();
+  if (SAVE_ERROR) {
+    DB = prev;                      // the old books, untouched
+    return { ok: false, error: SAVE_ERROR };
+  }
+  return {
+    ok: true,
+    counts: {
+      purchases: DB.purchases.length, income: DB.income.length,
+      branches: DB.branches.length, credit_payments: DB.credit_payments.length,
+      budgets: DB.budgets.length,
+    },
+  };
 }
 const nextId = () => (DB.seq += 1);
 
@@ -1045,8 +1107,29 @@ function statementResult(got, source) {
   return { ok: true, candidates: cand.slice(0, 200), uncertain: unc, source };
 }
 
-/* ---------------- request dispatcher (mirror server.py _api) ---------------- */
+/* ---------------- request dispatcher (mirror server.py _api) ----------------
+   route() answers; request() is the public entry and owns write safety: it
+   snapshots the store, runs the route, and if the write did not stick it puts
+   the store back and answers 507 — the same status server.py answers with when
+   its own disk is full. GETs are never snapshotted (they cannot write), and
+   neither are the /api/ai/* routes (they only propose, never write). */
 function request(method, path, qs, body) {
+  const writes = (method === "POST" || method === "DELETE") &&
+    path.indexOf("/api/ai/") !== 0;
+  const attempts = SAVE_ATTEMPTS;
+  const before = writes ? JSON.stringify(load()) : null;
+  const res = route(method, path, qs, body);
+  if (res && typeof res.then === "function") return res.then((r) => settled(r, before, attempts));
+  return settled(res, before, attempts);
+}
+
+function settled(res, before, attempts) {
+  if (before === null || SAVE_ATTEMPTS === attempts || !SAVE_ERROR) return res;
+  try { DB = JSON.parse(before); } catch (e) { /* keep what we have */ }
+  return { status: 507, body: { error: SAVE_ERROR } };
+}
+
+function route(method, path, qs, body) {
   qs = qs || {};
   body = body || {};
   load();
@@ -1217,5 +1300,6 @@ function request(method, path, qs, body) {
   return { status: 404, body: { error: "not found" } };
 }
 
-const PWDB = { request, load, save, storageKey: LS_KEY, setProvider, providerSet };
+const PWDB = { request, load, save, storageKey: LS_KEY, setProvider, providerSet,
+  storageStatus, exportData, importData };
 if (typeof globalThis !== "undefined") globalThis.PWDB = PWDB;

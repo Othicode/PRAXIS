@@ -2,7 +2,9 @@
 
 > **Read this first when starting a new session.** It is a snapshot of where
 > work stopped, what is green, and what is left. Last updated **2026-10-05**:
-> Phase 3 README edits done, Phases 1–3 committed as `aa6eb20`.
+> Phase 0 landed (backup / restore / CSV export + loud storage failures),
+> not yet committed; Phases 1–3 committed as `aa6eb20`, docs as `bed9f32`,
+> the Google-first AI connection work as `caf607e`.
 >
 > The product spec lives in `docs/AI_AUTOMATION_PLAN.md`; this file is only
 > about *state of the work*.
@@ -40,7 +42,7 @@ Constraints that are **not negotiable** (they break tests if violated):
 Run from the repo root:
 
 ```
-node smoke_test.js          -> 152 passed, 0 failed
+node smoke_test.js          -> 165 passed, 0 failed
 node audit_calculations.js  -> 160 passed, 0 failed (79 parity steps, 9 shared constants)
 python tools/cleanup_smoke.py   -> clean (branches: Main Shop; purchases: 0)
 python tools/check_static.py    -> OK
@@ -156,6 +158,57 @@ the stub `El`, income cleanup loop.
 
 ---
 
+### Phase 0 — your data, out loud ✅ (this session, not yet committed)
+
+Two halves: a write that cannot be stored must never look saved, and the owner
+must be able to take their records with them.
+
+**Storage failures are loud (both engines).**
+
+| Piece | Anchor |
+|---|---|
+| `STORAGE_FULL_ERROR` — the one shared sentence | `db.js` next to `LS_KEY`, `server.py` next to `CURRENCY` |
+| `SAVE_ERROR` / `SAVE_ATTEMPTS`, `save()` records instead of swallowing | `db.js` storage block |
+| `request()` wraps `route()`: snapshot → run → **507 + rollback** if the write did not stick | `db.js` dispatcher |
+| `PWDB.storageStatus()` / `exportData()` / `importData()` | `PWDB` export |
+| `server.py` `_storage_error()` maps `sqlite3.OperationalError` (disk / readonly / unable to open) → **507** | HTTP verbs, before the generic 500 |
+| `renderStorageBanner()` — persistent red banner until a write succeeds | `app.js`, called from `offlineRequest()`'s `finally` and from `api()` on 507 |
+
+Rollback means memory and storage stay in step: a failed write leaves **no**
+half-saved purchase (the offline smoke checks row counts before/after). The
+server half was probed for real: `attrib +R ledger.db` →
+`POST /api/purchases` → `507 {"error":"storage is full — …"}` with the record
+absent from the list afterwards.
+
+**Backup / restore / CSV export — `#data-dialog`, "Your data".**
+
+- Entry points: **More sheet → Your data**, the **profile dialog** row, and the
+  storage banner (which jumps straight to it).
+- **Backup** → one `pwbudget-backup-YYYY-MM-DD.json` in the *offline engine's own
+  shape*, whichever engine is live — so a file taken against the server restores
+  into the offline copy and vice versa. Server mode assembles it through the
+  ordinary APIs (meta, paged purchases/income, credits incl. payments, budgets
+  read back per month × branch).
+- **Restore** → replays through the ordinary create paths, **additive only**:
+  a record already present (date + product + total + branch, or date + source +
+  amount + reference) is counted and skipped. Safe to run twice, safe on a
+  device that already holds records, no new endpoints to mirror.
+- **CSV** → purchases / credits / money-in, with a BOM so Excel opens it right.
+- Read fan-out is **batched** (`pool(…, 4)`): ~72 parallel `GET /api/budget`
+  requests tripped the server's connection backlog, the app saw one refused
+  connection and switched itself to offline mode for the rest of the session.
+
+**Tests** — 13 new smoke checks (152 → 165): credits/purchases/money-in CSV
+headers, backup table coverage (both modes), restore-after-delete (both modes),
+and offline-only quota checks — a refused write answering 507 with the row
+rolled out of the store, the banner raising then clearing itself, and
+`importData()` round-tripping a backup while refusing junk *and* refusing to
+replace the books when there is no room to store them. `FakeStorage`
+gained a `fail` flag, `El` a `click()`, and the harness exports the new
+functions. `CACHE = "pwbudget-v23"`.
+
+---
+
 ## 4. What was outstanding — now DONE (2026-10-05)
 
 1. **README Phase 3 edits — done.** Added `income` to the data model, the
@@ -211,6 +264,13 @@ The AI connection dialog is now genuinely *select provider → paste key → Sav
   `_sync_prompts.py`, `_dedupe_ai.py`, `_hoist_statement.py`,
   `_orig_prompts.json`, `check_prompts.py`. The permanent home for the
   contract check is **audit section 5**, not a separate script.
+- **A burst of parallel `fetch`es can quietly downgrade the whole app.**
+  `api()` calls `serverDown()` on the *first* network error, which sets
+  `serverAvailable = false` for the rest of the session — every later request
+  then reads the local store instead of the server. In tests this shows up as
+  "why does server mode suddenly see an empty/old store?"; the symptom is a
+  handful of `PW Budget: server API unreachable` warnings. Keep read fan-out
+  bounded (`pool(items, fn, 4)`).
 
 ---
 
@@ -248,14 +308,18 @@ The AI connection dialog is now genuinely *select provider → paste key → Sav
 
 ## 7. Known blockers / deferred work
 
-- **Phase 0 never landed** (chosen last in an earlier session, then postponed
-  in favour of Phase 3). Still missing and still important:
-  - **Zero backup / restore / export for the end user.** The PWA stores
-    everything in `localStorage["pwbudget.v1"]`.
-  - `save()` in `db.js` **silently swallows quota errors** — a full device can
-    lose a write with no warning.
-  - No first-run onboarding, no CSV export reachable by the shop owner
-    (there *is* an admin `EXPORT_KINDS` path, incl. the new `"income"`).
+- **Phase 0 landed** (this session, see §3): backup / restore / CSV export is
+  reachable from *Your data*, and a refused write now returns 507 with the
+  store rolled back plus a persistent banner. Still not done in that area:
+  - **First-run onboarding** (nothing tells a new owner to download a backup).
+  - The **admin** `EXPORT_KINDS` CSV path still exists alongside the new
+    owner-facing export; they are separate code paths.
+  - `importData()` accepts a whole-store replace, but **no UI offers it** —
+    restore is additive by design, so a "wipe and restore" flow (explicit,
+    confirmed) is a deliberate future decision, not an oversight.
+  - The red banner only appears **after** a write fails; a device that is
+    already full at load time shows it on boot (`init()` calls
+    `renderStorageBanner()`), but there is no proactive free-space check.
 - **Real vision provider untested in a browser.** CORS for the three offered
   providers is now **measured**: preflight passes for Groq (204), Gemini (200)
   and OpenRouter (204), each returning a readable
@@ -280,11 +344,12 @@ The AI connection dialog is now genuinely *select provider → paste key → Sav
 | 4 | Knowledge base: `documents` / `references`, `/api/search`, then ask-your-books chat | FTS5 server-side; tokenizer + scorer in `db.js`; embeddings only when online. "Worthless until phases 2–3 have produced data" — they now do. |
 | 5 | Builder | Declarative JSON patch against a field whitelist. Never HTML, never `eval`'d JS, never SQL. Riskiest surface. |
 
-Other roadmap ideas in `README.md`: low-stock warnings per item, CSV export
-for the owner, PIN lock on the installed app.
+Other roadmap ideas in `README.md`: low-stock warnings per item, PIN lock on
+the installed app. (CSV export for the owner has since shipped — *Your data*.)
 
-**Suggested first move in a new session:** pick **Phase 0** (backup/restore +
-making `db.js`'s silent `save()` quota failure loud) — the biggest real-world
-risk — or run the still-unanswered **browser CORS check** against a real
-vision provider (§7), which decides whether live capture actually works before
-Phase 4 build on top of it.
+**Suggested first move in a new session:** commit the Phase 0 work if the four
+test commands are still green, then pick **Phase 4** (knowledge base /
+`documents` / `references` / ask-your-books) — or run the still-unanswered
+**browser CORS check** against a real vision provider (§7), which decides
+whether live capture actually works before Phase 4 build on top of it. A real
+Gemini key end-to-end test of `/api/ai/extract` is also still outstanding.

@@ -262,6 +262,31 @@ model's body.
 An unreachable model never fails a core path: `db.js` falls back to the same
 deterministic rules a keyless server runs, and the strip turns red to say so.
 
+## Your data — backup, restore, export
+
+Open **More → Your data** (or the identity chip → *Your data*). One dialog:
+
+- **⤓ Backup** downloads a single `pwbudget-backup-YYYY-MM-DD.json` holding
+  every branch, supplier, item, purchase, credit payment, money-in record and
+  budget. In **server mode** the file is assembled through the ordinary API, so
+  it holds exactly what the app can see; in **offline mode** it is the device
+  store itself. The two shapes are the same, so a file taken in one mode
+  restores into the other.
+- **⤒ Restore…** reads a backup back. It is **additive**: anything the backup
+  has that you don't already have is added, anything you already have is left
+  exactly as it is. Nothing is ever deleted, so running it twice is harmless
+  and there is no way for a stray file to wipe your books.
+- **Purchases / Credits / Money in** export a CSV (UTF-8 with BOM, so Excel
+  opens it cleanly) for a spreadsheet or an accountant.
+
+A backup is your only copy when the app runs offline — the ledger lives in the
+phone's `localStorage`, not on any server. Keep one somewhere safe.
+
+If the device runs out of storage, the write **fails loudly**: the dialog says
+`storage is full — this change was not saved…`, a red banner stays up until a
+save succeeds, and the failed change is rolled back rather than left looking
+saved. The server answers `507` with the same sentence when its disk is full.
+
 ## Tests
 
 ```
@@ -279,7 +304,10 @@ and the AI surface: the status strip, the coverage defaults, the settings
 dialog's provider list (and a provider switch swapping in that provider's own
 model id, never another's), a pasted key installing a device-side connection,
 an unreachable model falling back instead of failing, and *Forget* detaching
-it again.
+it again — plus **Your data**: the backup file's table coverage, each CSV's
+header and first row, a restore putting a deleted purchase back and nothing
+else, and (offline only) a full store answering `507` with the purchase rolled
+out of the store and the storage banner raising then clearing itself.
 Server smoke data is deleted by the harness; run
 `python tools/cleanup_smoke.py` afterwards if anything lingers (it also
 reports the clean state).

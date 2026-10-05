@@ -836,6 +836,36 @@ dialog::backdrop { background: rgba(0,0,0,.62); backdrop-filter: blur(3px); }
 .update-banner.hidden { display: none; }
 @keyframes updateSlide { from { opacity: 0; transform: translateY(10px); } }
 
+/* same slot as the update banner, but red: a write that did not happen is an
+   alarm, and it stays up until the device can save again */
+.storage-banner {
+  position: fixed; z-index: 96;
+  left: var(--gutter); right: calc(var(--gutter) + 66px);
+  bottom: calc(var(--tabbar-h) + var(--safe-b) + 14px);
+  background: #7f1d1d; color: #fee2e2;
+  border: 1px solid rgba(248,113,113,.45); cursor: pointer; text-align: left;
+  padding: 12px 15px; border-radius: 12px; font-size: 13px; font-weight: 700;
+  box-shadow: 0 14px 34px -10px rgba(127,29,29,.8);
+  animation: updateSlide .3s ease;
+}
+.storage-banner:hover { filter: brightness(1.12); }
+.storage-banner.hidden { display: none; }
+.update-banner:not(.hidden) + .storage-banner { bottom: calc(var(--tabbar-h) + var(--safe-b) + 64px); }
+
+/* ============ Your data dialog ============ */
+.data-rows { display: flex; flex-direction: column; gap: 10px; margin: 2px 0 12px; }
+.data-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 11px 12px; border: 1px solid var(--line-soft);
+  border-radius: 12px; background: var(--panel-deep);
+}
+.data-txt { flex: 1 1 auto; min-width: 150px; display: flex; flex-direction: column; gap: 3px; }
+.data-txt b { font-size: 13.5px; }
+.data-txt .hint { font-size: 11.5px; color: var(--muted); }
+.data-csv { display: flex; gap: 6px; flex-wrap: wrap; }
+#data-progress { display: block; margin-top: 8px; min-height: 14px; }
+#data-progress:empty { min-height: 0; }
+
 /* ============ Calculator widget ============ */
 .calc-fab {
   position: fixed; z-index: 300;

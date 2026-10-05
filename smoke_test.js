@@ -60,6 +60,7 @@ class El {
     const e = Object.assign({ target: this, currentTarget: this, preventDefault() {} }, ev || {});
     (this._listeners[t] || []).forEach((fn) => fn(e));
   }
+  click() { this.dispatch("click"); }   // HTMLElement.click(), for download links
   querySelector() { return new El("div", null); }
   querySelectorAll() { return []; }
   closest() { return null; }
@@ -92,9 +93,16 @@ function makeDocument() {
   };
 }
 class FakeStorage {
-  constructor() { this.m = new Map(); }
+  constructor() { this.m = new Map(); this.fail = false; }   // fail = "device is full"
   getItem(k) { return this.m.has(k) ? this.m.get(k) : null; }
-  setItem(k, v) { this.m.set(k, String(v)); }
+  setItem(k, v) {
+    if (this.fail) {
+      const e = new Error("The quota has been exceeded.");
+      e.name = "QuotaExceededError";
+      throw e;
+    }
+    this.m.set(k, String(v));
+  }
   removeItem(k) { this.m.delete(k); }
   clear() { this.m.clear(); }
 }
@@ -127,6 +135,8 @@ module.exports = {
   aiConfigured, aiStatus, aiAllows, setAiArea, aiScopeSummary,
   renderAiStrip, renderAiSettings, renderAiAreas, aiExtractRequest, aiBuildContext,
   loadAI, saveAI,
+  buildBackup, buildCsv, restoreBackup, summarizeRestore,
+  renderStorageBanner, openDataDialog, usingOfflineEngine,
   daysSince, ageTone, agePill, buildAlerts, renderAlerts, updateCreditBadge,
   applyTheme, currentTheme, toggleTheme,
 };
@@ -264,6 +274,12 @@ async function runMode(mode) {
     const todayISO = new Date().toISOString().slice(0, 10);
     return pw.updateCreditBadge([{ date: "2020-01-01" }, { date: todayISO }]) === 1 &&
            pw.updateCreditBadge([{ date: todayISO }]) === 0;
+  });
+  await check(mode + ": credits CSV carries the open credit", async () => {
+    const lines = (await pw.buildCsv("credits")).trim().split("\r\n");
+    return lines[0] ===
+      "date,branch,product,distributor,total,paid,balance,percent,payments,memo" &&
+      lines.length >= 2 && !lines[1].includes("undefined");
   });
 
   // ---- cleanup this mode's purchases ----
@@ -684,6 +700,84 @@ async function runMode(mode) {
     await pw.loadIncome();
     return hidden && !get("stmt-card").classList.contains("hidden");
   });
+
+  // ---- your data: backup, restore, CSV export ----
+  await check(mode + ": a backup file lists every table", async () => {
+    const b = await pw.buildBackup();
+    const d = b.data || {};
+    return b.app === "pwbudget" && b.kind === "backup" &&
+      Array.isArray(d.branches) && d.branches.length >= 1 &&
+      Array.isArray(d.purchases) && d.purchases.length >= 1 &&
+      Array.isArray(d.income) && d.income.length >= 1 &&
+      Array.isArray(d.distributors) && Array.isArray(d.products) &&
+      Array.isArray(d.credit_payments) && Array.isArray(d.budgets) &&
+      d.seq > 1 && typeof d.created === "string";
+  });
+  await check(mode + ": purchases CSV has a header and a real row", async () => {
+    const lines = (await pw.buildCsv("purchases")).trim().split("\r\n");
+    return lines[0] ===
+      "date,branch,distributor,product,unit,quantity,unit_price,total,payment_method,balance,memo" &&
+      lines.length >= 2 && !lines[1].includes("undefined") && !lines[1].includes("null");
+  });
+  await check(mode + ": money-in CSV has a header and a real row", async () => {
+    const lines = (await pw.buildCsv("income")).trim().split("\r\n");
+    return lines[0] === "date,branch,source,amount,reference,memo" &&
+      lines.length >= 2 && !lines[1].includes("undefined");
+  });
+  await check(mode + ": restore puts a deleted purchase back and nothing else", async () => {
+    const backup = await pw.buildBackup();          // taken before the deletion
+    const rows = backup.data.purchases;
+    const victim = rows.find((p) => (p.memo || "").includes(stamp)) || rows[rows.length - 1];
+    const before = (await apiGet("/api/purchases?page_size=200")).rows.length;
+    if (mode === "offline") PWDB.request("DELETE", `/api/purchases/${victim.id}`, {}, {});
+    else await fetch(BASE + `/api/purchases/${victim.id}`, { method: "DELETE" });
+    const gone = (await apiGet("/api/purchases?page_size=200")).rows.length;
+    const report = await pw.restoreBackup(backup.data);
+    const back = (await apiGet("/api/purchases?page_size=200")).rows.length;
+    return gone === before - 1 && back === before &&
+      report.purchases.added === 1 && report.income.added === 0 &&
+      report.branches.added === 0 && report.budgets.added === 0 &&
+      report.errors.length === 0;
+  });
+  if (mode === "offline") {
+    // The offline store is the ledger: when it refuses a write, the app must
+    // say so and leave nothing half-saved behind.
+    await check(mode + ": importData takes a backup back and refuses junk", () => {
+      const snap = PWDB.exportData();
+      const junk = PWDB.importData({ hello: 1 });          // not a backup
+      const back = PWDB.importData(snap);                  // the same file, twice
+      const same = JSON.stringify(PWDB.exportData()) === JSON.stringify(snap);
+      return junk.ok === false && /missing "branches"/.test(junk.error) &&
+        back.ok === true && same;
+    });
+    await check(mode + ": a full store refuses a whole-file restore too", () => {
+      const before = JSON.stringify(PWDB.exportData());
+      localStorage.fail = true;
+      const r = PWDB.importData(PWDB.exportData());
+      localStorage.fail = false;
+      const after = JSON.stringify(PWDB.exportData());
+      return r.ok === false && /not saved/.test(r.error) && after === before;
+    });
+    await check(mode + ": a full store refuses the write instead of pretending", () => {
+      const before = PWDB.request("GET", "/api/purchases", {}, {}).body.rows.length;
+      localStorage.fail = true;
+      const r = PWDB.request("POST", "/api/purchases", {}, {
+        date: "2026-10-05", branch_id: 1, distributor: "Quota Probe Co",
+        product: "Must not exist", unit: "bag", quantity: 1,
+        total_amount: 42, payment_method: "Cash", memo: "quota probe",
+      });
+      localStorage.fail = false;
+      const after = PWDB.request("GET", "/api/purchases", {}, {}).body.rows.length;
+      pw.renderStorageBanner();
+      const alarmUp = !get("storage-banner").classList.contains("hidden") &&
+        get("storage-banner").textContent.toLowerCase().includes("not being saved");
+      PWDB.save();                            // the device has room again
+      pw.renderStorageBanner();
+      const alarmDown = get("storage-banner").classList.contains("hidden");
+      return r.status === 507 && /not saved/.test(r.body.error) &&
+        after === before && alarmUp && alarmDown;
+    });
+  }
 
   // ---- cleanup this mode's scan purchases (they are written after the
   //      earlier cleanup pass, so they need their own) ----

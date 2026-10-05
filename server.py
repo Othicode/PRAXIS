@@ -40,6 +40,9 @@ import urllib.request
 BASE_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = BASE_DIR / "public"
 CURRENCY = "GH\u20b5"
+# Same sentence db.js uses when a write cannot be stored: the offline engine
+# and this server must report an unsaved change identically (status 507).
+STORAGE_FULL_ERROR = "storage is full — this change was not saved. Export a backup and free some space, then try again."
 
 # Hosting: Render (or any PaaS) injects $PORT and expects the process on
 # 0.0.0.0. Locally nothing changes: 127.0.0.1:8000 by default.
@@ -2140,6 +2143,17 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
 
     # -- HTTP verbs -----------------------------------------------------------
+    def _storage_error(self, exc):
+        """sqlite3.OperationalError that means the disk would not take the
+        write (full, read-only volume, unopenable file). db.js answers 507 for
+        the same condition on a phone, so both engines say the same thing —
+        loudly — instead of a generic 500 the UI reads as a mystery."""
+        msg = str(exc).lower()
+        if any(k in msg for k in ("disk", "readonly", "read-only", "unable to open")):
+            self.send_json({"error": STORAGE_FULL_ERROR}, 507)
+        else:
+            self.send_json({"error": str(exc)}, 500)
+
     def do_GET(self):
         try:
             parsed = urlparse(self.path)
@@ -2149,6 +2163,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._api("GET", parsed.path, parse_qs(parsed.query), None)
             else:
                 self._static(parsed.path)
+        except sqlite3.OperationalError as exc:
+            self._storage_error(exc)
         except Exception as exc:  # noqa: BLE001
             self.send_json({"error": str(exc)}, 500)
 
@@ -2164,6 +2180,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._admin_api("POST", parsed.path, parse_qs(parsed.query), payload)
             else:
                 self._api("POST", parsed.path, parse_qs(parsed.query), payload)
+        except sqlite3.OperationalError as exc:
+            self._storage_error(exc)
         except Exception as exc:  # noqa: BLE001
             self.send_json({"error": str(exc)}, 500)
 
@@ -2175,6 +2193,8 @@ class Handler(BaseHTTPRequestHandler):
             if not parsed.path.startswith("/api/"):
                 return self.send_json({"error": "not found"}, 404)
             self._api("DELETE", parsed.path, parse_qs(parsed.query), None)
+        except sqlite3.OperationalError as exc:
+            self._storage_error(exc)
         except Exception as exc:  # noqa: BLE001
             self.send_json({"error": str(exc)}, 500)
 

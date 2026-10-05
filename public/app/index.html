@@ -356,6 +356,7 @@ setTimeout(function () {
     <button class="nav-btn" data-view="branches"><span class="nav-ico">🏬</span><span class="nav-txt">Branches</span></button>
     <button class="nav-btn" id="btn-calc-more"><span class="nav-ico">🧮</span><span class="nav-txt">Calculator</span></button>
     <button class="nav-btn" id="btn-ai-more"><span class="nav-ico">🤖</span><span class="nav-txt">AI settings</span></button>
+    <button class="nav-btn" id="btn-data-more"><span class="nav-ico">💾</span><span class="nav-txt">Your data</span></button>
     <button class="nav-btn hidden" id="btn-install-more"><span class="nav-ico">⤓</span><span class="nav-txt">Install app</span></button>
   </div>
 </aside>
@@ -494,6 +495,10 @@ setTimeout(function () {
         <button type="button" class="seg-btn" id="theme-light">☀️ Bright</button>
       </div>
     </div>
+    <div class="data-row">
+      <div class="data-txt"><b>Your data</b><span class="hint">backup · restore · CSV export</span></div>
+      <button type="button" class="btn ghost small" id="btn-data-profile">Open</button>
+    </div>
     <div class="form-err" id="profile-err"></div>
     <div class="dialog-foot">
       <button type="button" class="btn ghost" data-close>Cancel</button>
@@ -554,6 +559,45 @@ setTimeout(function () {
   </form>
 </dialog>
 
+<!-- ============ Your data: backup, restore, export ============
+     A backup is one file the owner keeps themselves — the offline app has no
+     server to lean on, so this file is the whole safety net. Restore only ever
+     adds what is missing (nothing is deleted), which makes it safe to run
+     twice and safe to try on a device that already has records. -->
+<dialog id="data-dialog">
+  <div class="dialog-head">
+    <h3>💾 Your data</h3>
+    <button type="button" class="btn ghost small" data-close>✕</button>
+  </div>
+  <p class="dialog-sub" id="data-where">Where your records live.</p>
+
+  <div class="data-rows">
+    <div class="data-row">
+      <div class="data-txt"><b>Download a backup</b><span class="hint">every record, in one file you keep</span></div>
+      <button type="button" class="btn ghost" id="btn-backup">⤓ Backup</button>
+    </div>
+    <div class="data-row">
+      <div class="data-txt"><b>Restore from a backup</b><span class="hint">adds what is missing — never deletes</span></div>
+      <button type="button" class="btn ghost" id="btn-restore">⤒ Restore…</button>
+      <input type="file" id="data-file" accept="application/json,.json" class="hidden">
+    </div>
+    <div class="data-row">
+      <div class="data-txt"><b>Export a spreadsheet</b><span class="hint">opens in Excel or Google Sheets</span></div>
+      <span class="data-csv">
+        <button type="button" class="btn ghost small" data-csv="purchases">Purchases</button>
+        <button type="button" class="btn ghost small" data-csv="credits">Credits</button>
+        <button type="button" class="btn ghost small" data-csv="income">Money in</button>
+      </span>
+    </div>
+  </div>
+
+  <div class="hint" id="data-progress"></div>
+  <div class="form-err" id="data-err"></div>
+  <div class="dialog-foot">
+    <button type="button" class="btn primary" data-close>Done</button>
+  </div>
+</dialog>
+
 <!-- ============ Calculator widget (chat-widget style) ============ -->
 <button class="calc-fab" id="calc-fab" aria-label="Open calculator" title="Calculator">🧮</button>
 <div class="calc-shell" id="calc-shell" aria-hidden="true">
@@ -573,6 +617,9 @@ setTimeout(function () {
 </div>
 
 <button class="update-banner hidden" id="update-banner" title="Reload to get the new version">⬆ <strong>New version available</strong> — tap to update</button>
+<!-- Storage failures used to be silent (db.js swallowed them). Now the app
+     says so and offers the way out: a backup you can download first. -->
+<button class="storage-banner hidden" id="storage-banner" title="Open Your data">⚠ <strong>Storage problem</strong> — changes are not being saved. Tap to back up now.</button>
 <div class="toast" id="toast"></div>
 <script src="db.js"></script>
 <script src="app.js"></script>

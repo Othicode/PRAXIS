@@ -360,10 +360,20 @@ const OFFLINE_ENGINE = (() => {
 
 let serverAvailable = true;
 
+/* Are records going to this device rather than to a server? One question,
+   answered in one place: the capture gate and the "Your data" tools both need
+   it, and the two must never disagree. */
+const usingOfflineEngine = () => OFFLINE_ENGINE || !serverAvailable;
+
 async function offlineRequest(method, pathname, qs, body) {
   if (typeof PWDB === "undefined") throw new Error("offline engine not available in this browser");
+  let r;
   // awaited, not assumed-sync: /api/ai/extract may take a model round-trip.
-  const r = await PWDB.request(method, pathname, qs, body);
+  // The finally matters as much as the await: db.js reports a write that did
+  // not stick (device full), and that must surface as banner + error, never as
+  // a quiet success.
+  try { r = await PWDB.request(method, pathname, qs, body); }
+  finally { renderStorageBanner(); }
   if (r.status >= 400) throw new Error(r.body.error || `HTTP ${r.status}`);
   return r.body;
 }
@@ -379,6 +389,25 @@ function serverDown(path, method, u, qs, body) {
 function showOfflineBadge() {
   const el = $("#offline-badge");
   if (el) el.classList.remove("hidden");
+}
+
+/* ---------- storage health ----------
+   Both engines answer 507 when a write cannot be stored: db.js because the
+   phone's localStorage refused it, server.py because sqlite's disk did not.
+   The dialog that failed shows the reason; this banner is the persistent half,
+   so nobody keeps typing records into a store that is not taking them. */
+function renderStorageBanner(msg) {
+  const el = $("#storage-banner");
+  if (!el) return;
+  const st = (typeof PWDB !== "undefined" && PWDB.storageStatus)
+    ? PWDB.storageStatus() : { ok: true, error: "" };
+  const text = msg || (st.ok ? "" : st.error);
+  if (text) {
+    el.textContent = /storage is full/i.test(text)
+      ? "⚠ Storage is full — changes are NOT being saved. Tap to back up now."
+      : "⚠ Your changes are not being saved. Tap to back up now.";
+  }
+  el.classList.toggle("hidden", !text);
 }
 
 async function api(path, opts) {
@@ -410,7 +439,11 @@ async function api(path, opts) {
   }
 
   const rbody = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(rbody.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    renderStorageBanner(res.status === 507 ? String(rbody.error || "") : "");
+    throw new Error(rbody.error || `HTTP ${res.status}`);
+  }
+  renderStorageBanner("");      // a stored write clears the alarm
   return rbody;
 }
 
@@ -1786,7 +1819,7 @@ const SCAN_FIELD_INPUTS = {
 
 /* Photo capture needs the server (the offline engine has no vision). Paste
    works everywhere: the same /api/ai/extract route is served by db.js. */
-function scanOffline() { return OFFLINE_ENGINE || !serverAvailable; }
+function scanOffline() { return usingOfflineEngine(); }
 
 function setScanBusy(busy) {
   ["#btn-scan", "#btn-paste", "#btn-read-text"].forEach((s) => {
@@ -1934,6 +1967,378 @@ function resetScan() {
   if (txt) txt.value = "";
 }
 
+/* ================= Your data — backup, restore, export =================
+   The offline app has no server to lean on: localStorage on the phone IS the
+   ledger. So the owner needs a file they keep themselves, a way to put one
+   back, and a spreadsheet they can hand to an accountant.
+
+   Both are written against ordinary API calls, never against engine internals,
+   so one code path serves the offline engine and server.py alike, and neither
+   engine gains an endpoint the other has to mirror. Restore is deliberately
+   additive — it adds what is missing and deletes nothing, which makes it safe
+   to run twice and safe on a device that already holds records. */
+
+async function fetchAll(path) {
+  const sep = path.indexOf("?") >= 0 ? "&" : "?";
+  const first = await api(`${path}${sep}page=1&page_size=200`);
+  const rows = (first.rows || []).slice();
+  for (let p = 2; p <= (first.pages || 1); p++) {
+    const more = await api(`${path}${sep}page=${p}&page_size=200`);
+    rows.push(...(more.rows || []));
+  }
+  return rows;
+}
+
+/* Run async work in small batches: N parallel requests is a convenience, 2N is
+   a way to be refused a connection. */
+async function pool(items, fn, width) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  const n = Math.max(1, Math.min(width || 4, items.length));
+  await Promise.all(Array.from({ length: n }, worker));
+  return out;
+}
+
+/* One .json file in the offline engine's own shape, whichever engine the app
+   is talking to — so a backup taken against the server restores into the
+   offline copy and the other way round. */
+async function buildBackup() {
+  const envelope = (mode, data) => ({
+    app: "pwbudget", kind: "backup", format: 1,
+    exported: new Date().toISOString(), mode, data,
+  });
+  if (usingOfflineEngine()) return envelope("offline", PWDB.exportData());
+
+  const meta = await api("/api/meta");
+  const branches = (meta.branches || []).map((b) => ({ id: b.id, name: b.name }));
+  const distributors = (meta.distributor_options || [])
+    .map((d) => ({ id: d.id, name: d.name }));
+  const purchases = await fetchAll("/api/purchases");
+  const income = await fetchAll("/api/income");
+  const credits = await api("/api/credits");
+  const creditRows = (credits.open || []).concat(credits.settled || []);
+
+  // /api/products answers with a name and a unit; product_options answers with
+  // an id and a name. Together they rebuild the table exactly, including items
+  // nobody has bought yet — everything left crosses over by name, which is all
+  // the create path matches on.
+  const unitByName = {};
+  for (const p of meta.products || []) unitByName[p.name] = p.unit || "";
+  const products = (meta.product_options || []).map((p) => ({
+    id: p.id, name: p.name,
+    unit_default: p.unit_default || unitByName[p.name] || "",
+  }));
+  for (const p of meta.products || []) {
+    if (products.some((x) => x.name === p.name)) continue;
+    products.push({ id: null, name: p.name, unit_default: p.unit || "" });
+  }
+
+  const bName = {}, dName = {};
+  for (const b of branches) bName[b.id] = b.name;
+  for (const d of distributors) dName[d.id] = d.name;
+  const r2 = (x) => Math.round((Number(x) || 0) * 100) / 100;
+
+  const rows = purchases.map((p) => {
+    const pays = p.credit ? p.credit.payments || [] : [];
+    const paid = p.credit ? p.credit.paid : 0;
+    const isCredit = p.payment_method === "Credit";
+    return {
+      id: p.id, date: p.date, branch_id: p.branch_id,
+      branch: p.branch || bName[p.branch_id] || "",
+      distributor_id: p.distributor_id,
+      distributor: p.distributor || dName[p.distributor_id] || "",
+      product_id: p.product_id, product_name: p.product, unit: p.unit,
+      quantity: p.quantity, total_amount: p.total, unit_price: p.unit_price,
+      payment_method: p.payment_method,
+      credit_total: isCredit ? p.total : null,
+      // the ledger stores the first payment on the row and the rest one per
+      // line, so what the offline copy calls credit_paid is paid minus those.
+      credit_paid: isCredit ? r2(paid - pays.reduce((s, x) => s + x.amount, 0)) : null,
+      memo: p.memo || "", created_at: "",
+    };
+  });
+
+  const credit_payments = [];
+  let cp = 0;
+  for (const c of creditRows) {
+    for (const pay of c.payments || []) {
+      credit_payments.push({
+        id: ++cp, purchase_id: c.id, date: pay.date,
+        amount: pay.amount, memo: pay.memo || "",
+      });
+    }
+  }
+
+  // Budgets come back one month and branch at a time; slots nothing was ever
+  // saved for are left out (their answer is a recommendation, not a record).
+  // Read in small batches — a page of parallel requests is fine, seventy at
+  // once is not: the surplus is refused, and one refused connection is enough
+  // to switch the whole app to offline mode for the rest of the session.
+  const slots = [null].concat(branches.map((b) => b.id));
+  const year = new Date().getFullYear();
+  const reqs = [];
+  for (let m = 1; m <= 12; m++) for (const b of slots) reqs.push([year, m, b]);
+  const views = await pool(reqs, ([y, m, b]) =>
+    api(`/api/budget?year=${y}&month=${m}${b ? `&branch_id=${b}` : ""}`), 4);
+  const budgets = [];
+  views.forEach((v, i) => {
+    if (!v.saved) return;
+    const [y, m, b] = reqs[i];
+    budgets.push({
+      id: budgets.length + 1, branch_id: b, year: y, month: m,
+      total_amount: v.total_amount, save_amount: v.save_amount,
+      allocations: (v.allocations || []).map((a) => ({ name: a.name, percent: a.percent })),
+      updated_at: "",
+    });
+  });
+
+  let seq = 1;
+  const tables = { branches, distributors, products, purchases: rows, income, credit_payments, budgets };
+  for (const k in tables) for (const r of tables[k]) seq = Math.max(seq, Number(r.id) || 0);
+  tables.seq = seq + 1;
+  tables.version = 1;
+  tables.created = new Date().toISOString().slice(0, 10);
+  return envelope("server", tables);
+}
+
+/* ---------------- CSV ---------------- */
+const csvCell = (v) => {
+  const s = v === null || v === undefined ? "" : String(v);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+const toCsv = (head, rows) =>
+  [head.join(",")].concat(rows.map((r) => r.map(csvCell).join(","))).join("\r\n") + "\r\n";
+
+async function buildCsv(kind) {
+  if (kind === "income") {
+    const rows = await fetchAll("/api/income");
+    return toCsv(["date", "branch", "source", "amount", "reference", "memo"],
+      rows.map((r) => [r.date, r.branch, r.source, r.amount, r.reference, r.memo]));
+  }
+  if (kind === "credits") {
+    const c = await api("/api/credits");
+    const rows = (c.open || []).concat(c.settled || []);
+    return toCsv(
+      ["date", "branch", "product", "distributor", "total", "paid", "balance",
+       "percent", "payments", "memo"],
+      rows.map((r) => [r.date, r.branch, r.product, r.distributor, r.total,
+        r.paid, r.balance, r.percent,
+        (r.payments || []).map((p) => `${p.date}:${p.amount}`).join(" | "), r.memo]));
+  }
+  const rows = await fetchAll("/api/purchases");
+  return toCsv(
+    ["date", "branch", "distributor", "product", "unit", "quantity", "unit_price",
+     "total", "payment_method", "balance", "memo"],
+    rows.map((p) => [p.date, p.branch, p.distributor, p.product, p.unit,
+      p.quantity, p.unit_price, p.total, p.payment_method,
+      p.credit ? p.credit.balance : "", p.memo]));
+}
+
+function downloadFile(name, mime, text) {
+  try {
+    const url = URL.createObjectURL(new Blob([text], { type: mime }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    // detach only when the blob is revoked — removing the link synchronously
+    // can cancel the download in some browsers
+    setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 4000);
+    return true;
+  } catch (e) { return false; }
+}
+
+/* ---------------- restore ----------------
+   Replay through the ordinary create paths. Records that are already present
+   (same date, product, total and branch) are counted and left alone, so a
+   restore is idempotent: running it twice changes nothing the second time. */
+async function restoreBackup(data) {
+  const prog = $("#data-progress");
+  const say = (t) => { if (prog) prog.textContent = t; };
+  const num = (x) => Math.round((Number(x) || 0) * 100) / 100;
+  const report = {
+    branches: { added: 0, kept: 0 }, purchases: { added: 0, kept: 0 },
+    income: { added: 0, kept: 0 }, budgets: { added: 0, kept: 0 },
+    payments: { added: 0 }, errors: [],
+  };
+  const names = (rows) => {
+    const m = {};
+    for (const r of rows || []) if (r && r.id != null) m[r.id] = r.name || "";
+    return m;
+  };
+  const bNames = names(data.branches), dNames = names(data.distributors);
+
+  // 1. branches — a duplicate name is answered with 400, which is exactly the
+  //    "already here" answer we need.
+  const live = await api("/api/branches");
+  const liveByName = {};
+  for (const b of live.branches || []) liveByName[b.name] = b.id;
+  const bMap = {};
+  // a branch that did not make it into the backup keeps its raw id, and the
+  // create path then answers 400 for it — reported, not hidden.
+  const branchRef = (id) => (bMap[id] != null ? bMap[id] : id);
+  let i = 0;
+  for (const b of data.branches || []) {
+    i += 1;
+    say(`Checking branches… ${i}`);
+    if (liveByName[b.name]) { bMap[b.id] = liveByName[b.name]; report.branches.kept += 1; continue; }
+    try {
+      const r = await api("/api/branches", { method: "POST", body: JSON.stringify({ name: b.name }) });
+      bMap[b.id] = r.id;
+      liveByName[b.name] = r.id;
+      report.branches.added += 1;
+    } catch (e) { report.errors.push(`branch “${b.name}”: ${e.message}`); }
+  }
+
+  // 2. purchases, oldest first, so every credit payment finds its balance ready
+  const existing = await fetchAll("/api/purchases");
+  const pKey = (date, product, total, branch) => `${date}|${product}|${num(total)}|${branch}`;
+  const have = {}, existingId = {};
+  for (const p of existing) {
+    const k = pKey(p.date, p.product, p.total, p.branch);
+    have[k] = (have[k] || 0) + 1;
+    if (!(k in existingId)) existingId[k] = p.id;
+  }
+  const paysBy = {};
+  for (const cp of data.credit_payments || []) {
+    (paysBy[cp.purchase_id] = paysBy[cp.purchase_id] || []).push(cp);
+  }
+  const idMap = {}, addedIds = {};
+  const incoming = (data.purchases || []).slice()
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)) || (a.id || 0) - (b.id || 0));
+  i = 0;
+  for (const p of incoming) {
+    i += 1;
+    if (i % 5 === 0 || i === incoming.length) say(`Restoring purchases… ${i}/${incoming.length}`);
+    const branch = p.branch || bNames[p.branch_id] || "";
+    const k = pKey(p.date, p.product_name, p.total_amount, branch);
+    if (have[k] > 0) {
+      have[k] -= 1;
+      idMap[p.id] = existingId[k];
+      report.purchases.kept += 1;
+      continue;
+    }
+    try {
+      const r = await api("/api/purchases", {
+        method: "POST",
+        body: JSON.stringify({
+          date: p.date,
+          branch_id: branchRef(p.branch_id),
+          distributor: p.distributor || dNames[p.distributor_id] || "",
+          product: p.product_name, unit: p.unit, quantity: p.quantity,
+          total_amount: p.total_amount, payment_method: p.payment_method,
+          memo: p.memo || "", credit_paid: p.credit_paid || 0,
+        }),
+      });
+      idMap[p.id] = r.id;
+      addedIds[p.id] = true;
+      report.purchases.added += 1;
+    } catch (e) { report.errors.push(`${p.date} “${p.product_name}”: ${e.message}`); }
+  }
+
+  // 3. the payments recorded against the purchases this run just added
+  for (const p of incoming) {
+    const to = idMap[p.id];
+    if (!to || !addedIds[p.id]) continue;   // already here: its payments are too
+    const pays = (paysBy[p.id] || []).slice()
+      .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    for (const cp of pays) {
+      try {
+        await api(`/api/purchases/${to}/pay`, {
+          method: "POST",
+          body: JSON.stringify({ date: cp.date, amount: cp.amount, memo: cp.memo || "" }),
+        });
+        report.payments.added += 1;
+      } catch (e) { report.errors.push(`payment on ${p.date}: ${e.message}`); }
+    }
+  }
+
+  // 4. money in
+  const incHave = {};
+  for (const r of await fetchAll("/api/income")) {
+    const k = `${r.date}|${r.source}|${num(r.amount)}|${r.reference || ""}`;
+    incHave[k] = (incHave[k] || 0) + 1;
+  }
+  const income = (data.income || []).slice()
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)) || (a.id || 0) - (b.id || 0));
+  i = 0;
+  for (const r of income) {
+    i += 1;
+    if (i % 5 === 0 || i === income.length) say(`Restoring money in… ${i}/${income.length}`);
+    const k = `${r.date}|${r.source}|${num(r.amount)}|${r.reference || ""}`;
+    if (incHave[k] > 0) { incHave[k] -= 1; report.income.kept += 1; continue; }
+    try {
+      await api("/api/income", {
+        method: "POST",
+        body: JSON.stringify({
+          date: r.date,
+          branch_id: branchRef(r.branch_id),
+          source: r.source, amount: r.amount,
+          reference: r.reference || "", memo: r.memo || "",
+        }),
+      });
+      report.income.added += 1;
+    } catch (e) { report.errors.push(`${r.date} “${r.source}”: ${e.message}`); }
+  }
+
+  // 5. budgets — a slot that already holds one is left as it is
+  const budgets = data.budgets || [];
+  i = 0;
+  for (const b of budgets) {
+    i += 1;
+    say(`Restoring budgets… ${i}/${budgets.length}`);
+    try {
+      const bid = branchRef(b.branch_id);
+      const now = await api(`/api/budget?year=${b.year}&month=${b.month}${bid ? `&branch_id=${bid}` : ""}`);
+      if (now.saved) { report.budgets.kept += 1; continue; }
+      await api("/api/budget", {
+        method: "POST",
+        body: JSON.stringify({
+          year: b.year, month: b.month, branch_id: bid,
+          total_amount: b.total_amount, save_amount: b.save_amount,
+          allocations: b.allocations || [],
+        }),
+      });
+      report.budgets.added += 1;
+    } catch (e) { report.errors.push(`budget ${b.year}-${b.month}: ${e.message}`); }
+  }
+
+  say("");
+  return report;
+}
+
+function summarizeRestore(r) {
+  const parts = [];
+  const add = (label, s) => { if (s.added || s.kept) parts.push(`${label}: ${s.added} added, ${s.kept} already there`); };
+  add("branches", r.branches);
+  add("purchases", r.purchases);
+  add("money in", r.income);
+  add("budgets", r.budgets);
+  if (r.payments.added) parts.push(`${r.payments.added} credit payments added`);
+  return parts.join(" · ") || "nothing new to add";
+}
+
+/* ---------------- dialog ---------------- */
+function openDataDialog() {
+  const err = $("#data-err"), prog = $("#data-progress"), where = $("#data-where");
+  if (err) err.textContent = "";
+  if (prog) prog.textContent = "";
+  if (where) {
+    where.textContent = usingOfflineEngine()
+      ? "Everything is saved on this device — there is no server behind it, so a backup file is your only copy. Keep one somewhere safe."
+      : "Records live on the server. This backup is your own copy of them; restoring adds what is missing and never deletes.";
+  }
+  const dlg = $("#data-dialog");
+  if (dlg && dlg.showModal) dlg.showModal();
+}
+
 /* ---------- bindings ---------- */
 function bindAll() {
   $$(".nav-btn").forEach((b) => b.addEventListener("click", () => {
@@ -1974,6 +2379,77 @@ function bindAll() {
   if (pc) pc.addEventListener("click", openProfileDialog);
   const pf = $("#profile-form");
   if (pf) pf.addEventListener("submit", submitProfile);
+
+  /* --- your data: backup, restore, CSV export --- */
+  const openData = () => { closeMore(); openDataDialog(); };
+  const dataMore = $("#btn-data-more");
+  if (dataMore) dataMore.addEventListener("click", openData);
+  const dataProfile = $("#btn-data-profile");
+  if (dataProfile) dataProfile.addEventListener("click", openData);
+  const storageAlarm = $("#storage-banner");
+  if (storageAlarm) storageAlarm.addEventListener("click", openData);
+
+  const backupBtn = $("#btn-backup");
+  if (backupBtn) backupBtn.addEventListener("click", async () => {
+    const err = $("#data-err"), prog = $("#data-progress");
+    err.textContent = "";
+    prog.textContent = "Building the backup…";
+    try {
+      const file = await buildBackup();
+      const name = `pwbudget-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      if (!downloadFile(name, "application/json", JSON.stringify(file, null, 2)))
+        throw new Error("this browser would not start the download — try once more");
+      prog.textContent = `Saved ${name} · ${file.data.purchases.length} purchases, ` +
+        `${file.data.income.length} money-in, ${file.data.branches.length} branches.`;
+    } catch (e) { prog.textContent = ""; err.textContent = e.message; }
+  });
+
+  const restoreBtn = $("#btn-restore");
+  if (restoreBtn) restoreBtn.addEventListener("click", () => {
+    const inp = $("#data-file");
+    if (inp) inp.click();
+  });
+  const dataFile = $("#data-file");
+  if (dataFile) dataFile.addEventListener("change", async (ev) => {
+    const input = ev.target;
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    input.value = "";          // reset now: the same file must be choosable again,
+                               // even if the user cancels or the parse throws
+    const err = $("#data-err"), prog = $("#data-progress");
+    err.textContent = "";
+    prog.textContent = "Reading the backup…";
+    try {
+      const parsed = JSON.parse(await file.text());
+      const data = parsed && parsed.kind === "backup" ? parsed.data : parsed;
+      if (!confirm("Restore adds the records from this backup that aren't already here — nothing is deleted. Continue?")) {
+        prog.textContent = "";
+        return;
+      }
+      const report = await restoreBackup(data);
+      prog.textContent = `Restored · ${summarizeRestore(report)}.`;
+      if (report.errors.length) {
+        err.textContent = report.errors.slice(0, 4).join(" · ") +
+          (report.errors.length > 4 ? ` … +${report.errors.length - 4} more` : "");
+      }
+      await refreshMeta();
+      switchView(state.view);
+    } catch (e) { prog.textContent = ""; err.textContent = e.message; }
+  });
+
+  $$("[data-csv]").forEach((b) => b.addEventListener("click", async () => {
+    const err = $("#data-err"), prog = $("#data-progress");
+    err.textContent = "";
+    prog.textContent = "Building the spreadsheet…";
+    try {
+      const kind = b.getAttribute("data-csv");
+      const csv = await buildCsv(kind);
+      const name = `pwbudget-${kind}-${new Date().toISOString().slice(0, 10)}.csv`;
+      if (!downloadFile(name, "text/csv;charset=utf-8", "\ufeff" + csv))
+        throw new Error("this browser would not start the download — try once more");
+      prog.textContent = `Saved ${name}`;
+    } catch (e) { prog.textContent = ""; err.textContent = e.message; }
+  }));
   const tb = $("#btn-theme");
   if (tb) tb.addEventListener("click", toggleTheme);
   [["theme-dark", "dark"], ["theme-light", "light"]].forEach(([id, t]) => {
@@ -2278,6 +2754,7 @@ async function init() {
   populateFilters();
   populateBranches();
   bindAll();
+  renderStorageBanner();   // a store that refused a write says so from the start
   renderAiStrip();
   initInstall();
 
