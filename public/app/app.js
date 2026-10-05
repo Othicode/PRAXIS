@@ -1417,21 +1417,30 @@ async function submitPay(e) {
    party. Without one, both engines fall back to the same built-in rules. */
 const AI_KEY_STORAGE = "pwbudget.ai.v1";
 
+/* Each preset is a real, currently-free endpoint: `models` is the datalist
+   offered under it, `note` is what the dialog tells the owner about it.
+   `google` leads because its free tier is the only one that both takes a key
+   with no card and reads photographs — which is what a slip scan needs. */
 const AI_PROVIDERS = [
+  { id: "gemini", name: "Google Gemini", label: "Google Gemini · free, no card",
+    base: "https://generativelanguage.googleapis.com/v1beta/openai",
+    get: "https://aistudio.google.com/apikey",
+    models: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"],
+    note: "Free with no card, and it reads photos — the simplest pick." },
   { id: "groq", name: "Groq", label: "Groq · free, no card",
     base: "https://api.groq.com/openai/v1",
     get: "https://console.groq.com/keys",
-    models: ["groq/compound", "openai/gpt-oss-120b", "qwen/qwen3.6-27b"] },
-  { id: "gemini", name: "Gemini", label: "Google Gemini · free tier",
-    base: "https://generativelanguage.googleapis.com/v1beta/openai",
-    get: "https://aistudio.google.com/apikey",
-    models: ["gemini-2.5-flash", "gemini-2.0-flash"] },
+    models: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
+    note: "Free plan: 1,000 requests a day. Text only — no camera scans." },
   { id: "openrouter", name: "OpenRouter", label: "OpenRouter · free models",
     base: "https://openrouter.ai/api/v1",
     get: "https://openrouter.ai/keys",
-    models: ["google/gemma-4-31b-it:free", "openai/gpt-oss-20b:free"] },
+    models: ["openrouter/free", "google/gemma-4-31b-it:free",
+             "qwen/qwen3.8-27b:free", "thinkingmachines/inkling:free"],
+    note: "Free models, no card — several of them read photos." },
   { id: "custom", name: "Custom", label: "Custom · OpenAI-compatible",
-    base: "", get: "", models: [] },
+    base: "", get: "", models: [],
+    note: "Any OpenAI-compatible endpoint you already have." },
 ];
 
 /* The coverage. Every area is live, not aspirational: `capture` decides
@@ -1449,7 +1458,7 @@ const AI_AREAS = [
     note: "let it propose changes to this app itself" },
 ];
 
-let AI = { provider: "groq", base: "", model: "", key: "", areas: null };
+let AI = { provider: "gemini", base: "", model: "", key: "", areas: null };
 let AI_LAST_ERROR = "";
 
 const aiAreaDefault = (id) => id === "capture" || id === "catalogue";
@@ -1460,7 +1469,7 @@ function loadAI() {
     const o = raw ? JSON.parse(raw) : null;
     if (o && typeof o === "object") {
       AI = {
-        provider: String(o.provider || "groq"),
+        provider: String(o.provider || "gemini"),
         base: String(o.base || ""),
         model: String(o.model || ""),
         key: String(o.key || ""),
@@ -1478,7 +1487,23 @@ function saveAI() {
 
 const aiPreset = () => AI_PROVIDERS.find((p) => p.id === AI.provider) || AI_PROVIDERS[0];
 const aiBase = () => (AI.provider === "custom" ? AI.base : aiPreset().base).replace(/\/+$/, "");
-const aiModel = () => (AI.model || aiPreset().models[0] || "").trim();
+
+/* A model id belongs to exactly one provider. The stored one can be left over
+   from another — the owner saved with Groq, then switched to Google — and
+   asking Google for `openai/gpt-oss-120b` would only fail after the key was
+   accepted, which looks like a broken key rather than a wrong model. So an id
+   that sits on some *other* preset's list is not this connection's id and the
+   provider's default takes over. An id on no list is left alone: a custom
+   endpoint may serve models this app has never heard of. */
+function aiOwnModel() {
+  const m = String(AI.model || "").trim();
+  if (!m || AI.provider === "custom") return m;
+  if ((aiPreset().models || []).includes(m)) return m;
+  const elsewhere = AI_PROVIDERS.some((p) =>
+    p.id !== "custom" && p.id !== AI.provider && (p.models || []).includes(m));
+  return elsewhere ? "" : m;
+}
+const aiModel = () => (aiOwnModel() || aiPreset().models[0] || "").trim();
 const aiConfigured = () => !!(AI.key && aiBase() && aiModel());
 
 /* Install the device's connection into the offline engine. This is the one
@@ -1610,6 +1635,8 @@ function renderAiSettings() {
     get.classList.toggle("hidden", !url);
     if (url) get.setAttribute("href", url);
   }
+  const note = $("#ai-note");
+  if (note) note.textContent = aiPreset().note || "";
   renderAiAreas();
   renderAiTest("");
   const err = $("#ai-err");
@@ -1636,7 +1663,7 @@ function renderAiTest(msg) {
 
 function readAiForm() {
   return {
-    provider: (($("#ai-provider") || {}).value || "groq"),
+    provider: (($("#ai-provider") || {}).value || "gemini"),
     key: (($("#ai-key") || {}).value || "").trim(),
     model: (($("#ai-model") || {}).value || "").trim(),
     base: (($("#ai-base") || {}).value || "").trim(),
@@ -2030,6 +2057,7 @@ function bindAll() {
   if (aiForm) aiForm.addEventListener("submit", (e) => {
     e.preventDefault();
     Object.assign(AI, readAiForm());
+    AI.model = aiModel();   // never persist an id that belongs to another provider
     saveAI();
     AI_LAST_ERROR = "";
     renderAiSettings();

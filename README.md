@@ -239,12 +239,16 @@ Every AI path has a working no-key fallback, so this is optional — but with a
 key the slip reader gets a real model instead of regex rules.
 
 1. Tap the **AI strip** (or *AI settings* in the phone's **More** sheet).
-2. Pick a provider — **Groq**, **Google Gemini** or **OpenRouter** are all
+2. Pick a provider — **Google Gemini**, **Groq** or **OpenRouter** are all
    free tiers with no credit card; *Custom* takes any OpenAI-compatible
-   `base URL`. **Get a free key ↗** opens the right console.
-3. Paste the key, choose the model (*Test connection* proves the key, endpoint
-   and model all answer, by checking the reply came from a model rather than
-   from the built-in rules), set the coverage, **Save**.
+   `base URL`. A one-line note under the picker says what that provider can
+   do (Gemini is the free one that also **reads photos**; Groq's free plan is
+   text-only). **Get a free key ↗** opens the right console.
+3. Paste the key — the **model id is filled in for you** from that provider's
+   own free list, and an id left over from a *different* provider is dropped
+   rather than sent to the wrong endpoint. *Test connection* proves the key,
+   endpoint and model all answer, by checking the reply came from a model
+   rather than from the built-in rules. Set the coverage, **Save**.
 
 The key is stored in this device's `localStorage` under `pwbudget.ai.v1` and
 is sent to **nothing but the provider you picked** — never to this project's
@@ -272,7 +276,8 @@ payments, budget auto-distribute, branch creation + navigation, analytics,
 the calculator math, the capture flow
 (text → extract → review card → each line saved through `/api/purchases`),
 and the AI surface: the status strip, the coverage defaults, the settings
-dialog's provider list, a pasted key installing a device-side connection,
+dialog's provider list (and a provider switch swapping in that provider's own
+model id, never another's), a pasted key installing a device-side connection,
 an unreachable model falling back instead of failing, and *Forget* detaching
 it again.
 Server smoke data is deleted by the harness; run

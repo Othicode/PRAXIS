@@ -513,11 +513,12 @@ setTimeout(function () {
       <h3>🤖 AI connection</h3>
       <button type="button" class="btn ghost small" data-close>✕</button>
     </div>
-    <p class="dialog-sub">Pick a free provider, paste its key, then choose how much of this app the model may reach. Without a key the app still works — it just reads slips with built-in rules instead of a model.</p>
+    <p class="dialog-sub">Three steps: pick a provider, paste its key, press Save — the model id is chosen for you. Then decide how much of this app the model may reach. Without a key the app still works; it just reads slips with built-in rules instead of a model.</p>
 
     <div class="form-grid">
       <label class="full">Provider
         <select id="ai-provider"></select>
+        <span class="hint" id="ai-note"></span>
       </label>
       <label class="full">API key
         <span class="key-row">

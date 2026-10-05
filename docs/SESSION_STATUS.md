@@ -40,7 +40,7 @@ Constraints that are **not negotiable** (they break tests if violated):
 Run from the repo root:
 
 ```
-node smoke_test.js          -> 148 passed, 0 failed
+node smoke_test.js          -> 152 passed, 0 failed
 node audit_calculations.js  -> 160 passed, 0 failed (79 parity steps, 9 shared constants)
 python tools/cleanup_smoke.py   -> clean (branches: Main Shop; purchases: 0)
 python tools/check_static.py    -> OK
@@ -170,6 +170,31 @@ the stub `El`, income cleanup loop.
 3. **Tests re-run green after the doc edits** — audit 160, smoke 148,
    `cleanup_smoke.py` clean, `check_static.py` OK.
 
+### 5. Provider presets fixed (2026-10-05) — Google first
+
+The AI connection dialog is now genuinely *select provider → paste key → Save*:
+
+- **`AI_PROVIDERS` (`app.js`) rebuilt against live data.** Dead/stale ids
+  dropped: `groq/compound` (no longer in Groq's API enum), `qwen/qwen3.6-27b`
+  (exists but not on the free plan), `openai/gpt-oss-20b:free` (no longer
+  free). Free, verified ids now offered — Groq `openai/gpt-oss-120b` /
+  `openai/gpt-oss-20b` / `qwen/qwen3.8-27b`; OpenRouter `openrouter/free`,
+  `google/gemma-4-31b-it:free`, `qwen/qwen3.8-27b:free`,
+  `thinkingmachines/inkling:free`.
+- **Gemini leads and is the default** (`id` stayed `"gemini"` — changing it
+  would break stored configs and the smoke assertion on the option value).
+  Each preset carries a `note` rendered under the picker.
+- **`aiOwnModel()`** — a model id that belongs to *another* provider is
+  discarded instead of being sent to the wrong endpoint (it used to survive
+  a provider switch and fail only after the key was accepted). Unknown ids
+  on *custom* endpoints are left alone. Save persists `aiModel()`, never the
+  raw field.
+- `CACHE` bumped to `pwbudget-v22`; 2 new smoke checks × 2 modes (152).
+- **CORS measured, not assumed** (relevant to §7 below): `OPTIONS` preflight →
+  Groq 204, Gemini 200, OpenRouter 204, **Ollama Cloud 405** — so Ollama Cloud
+  is server-side only and is not offered as a device key. All three offered
+  providers return a readable `Access-Control-Allow-Origin`.
+
 ---
 
 ## 5. Environment / tooling gotchas (cost real time this session)
@@ -231,11 +256,16 @@ the stub `El`, income cleanup loop.
     lose a write with no warning.
   - No first-run onboarding, no CSV export reachable by the shop owner
     (there *is* an admin `EXPORT_KINDS` path, incl. the new `"income"`).
-- **Real vision provider untested in a browser.** Groq/Gemini/OpenRouter CORS
-  from a browser tab is unverified. If blocked, `aiChat` returns `null`, the
-  built-in rules run, and the strip goes red with
-  `Could not reach <model> — using built-in rules instead.` No desktop browser
-  is connected to this session.
+- **Real vision provider untested in a browser.** CORS for the three offered
+  providers is now **measured**: preflight passes for Groq (204), Gemini (200)
+  and OpenRouter (204), each returning a readable
+  `Access-Control-Allow-Origin` — so the browser is allowed to call them.
+  What is still untested is a **real key** making a real vision call (no key
+  in this session, and no desktop browser connected). If it is ever blocked,
+  `aiChat` returns `null`, the built-in rules run, and the strip goes red with
+  `Could not reach <model> — using built-in rules instead.`
+  Note **Ollama Cloud is not an option here**: its preflight answers 405 with
+  no CORS headers, so it works from `server.py` only.
 - Preset model IDs in the settings datalist may be stale — *Test connection*
   is the workaround.
 - `save()` aside, no real-device check of the new Money in view has happened;

@@ -599,6 +599,33 @@ async function runMode(mode) {
     return !pw.aiConfigured() && PWDB.providerSet() === false &&
       pw.aiStatus().tone === "off";
   });
+  await check(mode + ": picking a provider swaps in that provider's model", () => {
+    // Saved with Groq…
+    get("ai-provider").value = "groq";
+    get("ai-key").value = "gsk-test";
+    get("ai-model").value = "openai/gpt-oss-120b";
+    get("ai-form").dispatch("submit");
+    const groqModel = get("ai-model").value;
+    // …then switched to Google: the field must not still name a Groq model,
+    // and the dialog must say which provider this is.
+    get("ai-provider").value = "gemini";
+    get("ai-provider").dispatch("change");
+    return groqModel === "openai/gpt-oss-120b" &&
+      get("ai-model").value === "gemini-2.5-flash" &&
+      get("ai-note").textContent.length > 0;
+  });
+  await check(mode + ": a model id from another provider is not saved with it", () => {
+    get("ai-provider").value = "gemini";
+    get("ai-key").value = "AIza-test-google";
+    get("ai-model").value = "openai/gpt-oss-120b";      // a Groq id, not Google's
+    get("ai-form").dispatch("submit");
+    const stored = JSON.parse(localStorage.getItem("pwbudget.ai.v1") || "{}");
+    const ok = stored.provider === "gemini" && stored.model === "gemini-2.5-flash" &&
+      pw.aiConfigured() && pw.aiStatus().text.includes("Google Gemini");
+    get("ai-key").value = "";                           // leave the device clean
+    get("ai-form").dispatch("submit");
+    return ok;
+  });
 
   // ---- money in: a person records it, or a statement proposes it ----
   await check(mode + ": money-in dialog opens with a branch and today", () => {
