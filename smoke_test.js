@@ -1043,6 +1043,19 @@ async function runMode(mode) {
       bad.status === 400;
   });
 
+  await check(mode + ": /api/ai/voice replies even with no model attached", async () => {
+    const r = await fetch(BASE + "/api/ai/voice", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transcript: "five hundred cedis for transport", lang: "en",
+                             snapshot: { year: 2026, month: 10, total: 3000, items: [] } }),
+    });
+    const j = await r.json();
+    const bad = await fetch(BASE + "/api/ai/voice", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: "{}" });
+    return r.status === 200 && typeof j.text === "string" && j.text.length > 0 &&
+      bad.status === 400;
+  });
+
   // ---- money in: a person records it, or a statement proposes it ----
   await check(mode + ": money-in dialog opens with a branch and today", () => {
     pw.openIncomeDialog();

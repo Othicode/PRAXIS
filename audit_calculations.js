@@ -500,6 +500,16 @@ async function scenario(call) {
     context: "Branch: Main Shop",
   });
   await step("ai:chat text form", "POST", "/api/ai/chat", {}, { text: "hello" });
+  await step("ai:voice empty", "POST", "/api/ai/voice", {}, {});
+  await step("ai:voice no provider", "POST", "/api/ai/voice", {}, {
+    transcript: "five hundred cedis for transport", lang: "en",
+    snapshot: { year: 2026, month: 10, total: 3000,
+                items: [{ name: "transport", percent: 20, amount: 480 }] },
+  });
+  await step("ai:voice history", "POST", "/api/ai/voice", {}, {
+    transcript: "make it 400", lang: "tw",
+    history: [{ role: "user", content: "change transport to 500" }],
+  });
   await step("ai:unknown route", "POST", "/api/ai/nope", {}, {});
 
   return log;
@@ -746,6 +756,7 @@ async function auditFixtures() {
     const CONTRACT = ["AI_SYSTEM", "AI_PROMPT_IMAGE", "AI_PROMPT_TEXT_PREFIX",
                       "AI_PROMPT_INSTRUCT", "AI_PROMPT_STATEMENT_IMAGE",
                       "AI_PROMPT_STATEMENT_TEXT_PREFIX", "AI_PROMPT_AGENT",
+                      "AI_PROMPT_VOICE",
                       "AI_AGENT_OFFLINE", "AI_AGENT_DOWN",
                       "AI_IMAGE_ERROR", "AI_NOTHING_ERROR", "AI_READ_ERROR"];
     const grab = (src, name) => {

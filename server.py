@@ -1126,6 +1126,7 @@ AI_PROMPT_STATEMENT_TEXT_PREFIX = "Read this statement text and return JSON {\"c
 AI_PROMPT_AGENT = "You are the control centre of PW Budget, a bookkeeping app for a small shop. The owner types instructions here; the app is your body and the tools below are your hands. Answer with one JSON object only \u2014 no prose, no markdown: {\"reply\":\"what you say to the owner\",\"actions\":[{\"tool\":\"tool_id\",\"args\":{}}]}. Rules: use only the tools listed below and only the arguments they declare; propose at most what the instruction needs; never claim a change already happened, because every write is a proposal the owner approves by hand \u2014 write \"I will\", not \"I did\"; when you need data first, ask for the read tools and wait for the result; when the owner refuses, adjust instead of repeating yourself; when nothing fits, say so plainly and name the closest tool. Tools marked [locked] are held by a coverage switch the owner has left off: never claim you can run one, and offer propose_coverage only when widening access would actually help."
 AI_AGENT_OFFLINE = "I can think, but there is no model attached to this device. Add a free key under Settings \u2192 AI connection and I will take over from there."
 AI_AGENT_DOWN = "I could not reach the model just now \u2014 check the connection and try again."
+AI_PROMPT_VOICE = "You are the voice assistant of PW Budget, a budgeting app for a shop in Ghana. The owner speaks in their own language; you receive the language, a compact snapshot of the current budget, and the transcript of what was just said. Answer with one JSON object only \u2014 no prose, no markdown: {\"reply\":\"one short plain sentence in the owner's language\",\"actions\":[{\"op\":\"add_item\",\"name\":\"transport\",\"amount\":500}]}. The six actions: add_item {name, amount}, update_item {name, amount}, delete_item {name}, set_total {amount, save}, add_note {text}, ask_clarification {question}. Rules: reply in the language of the transcript, short and free of jargon; use only amounts the owner actually said \u2014 never invent an amount and never convert currencies; amounts are GH\u20b5 cedis; names for update_item and delete_item must match the snapshot exactly; if a name is missing, an amount was not spoken, or the request is unclear, send exactly one action, ask_clarification, with one short question; delete_item and set_total disturb what already exists, so add confirm true to them only when the owner clearly agreed; at most 6 actions; never claim a change was made \u2014 the app applies what it validates."
 
 
 def _r2(x):
@@ -1706,6 +1707,44 @@ def ai_agent(payload):
     return 200, {"text": out, "source": "model"}
 
 
+def ai_voice(payload):
+    """The voice overlay's one call — mirror of db.js aiVoice().
+
+    The panel sends the transcript, the owner's language and a compact budget
+    snapshot; back goes the model's raw text for voice.js to parse and
+    validate before anything is applied."""
+    transcript = str(payload.get("transcript") or "")
+    if not transcript.strip():
+        return 400, {"error": AI_NOTHING_ERROR}
+    if not AI_API_KEY:
+        return 200, {"text": AI_AGENT_OFFLINE, "source": "heuristic"}
+    lang = str(payload.get("lang") or "en")[:12]
+    snap = payload.get("snapshot")
+    if not isinstance(snap, dict):
+        snap = {}
+    hist = payload.get("history")
+    if not isinstance(hist, list):
+        hist = []
+    parts = []
+    if hist:
+        def _vrole(m):
+            return str(m.get("role") or "user") if isinstance(m, dict) else "user"
+
+        def _vcontent(m):
+            return str(m.get("content") or "") if isinstance(m, dict) else ""
+
+        lines = [f"{_vrole(m)}: {_vcontent(m)[:2000]}" for m in hist[-6:]]
+        parts.append("Conversation:\n" + "\n".join(lines))
+    parts.append("Language: " + lang)
+    parts.append("Budget snapshot: " + json.dumps(snap, ensure_ascii=False)[:4000])
+    parts.append("Transcript: " + transcript[:2000])
+    parts.append("Reply with the JSON object now.")
+    out = _ai_chat("\n\n".join(parts), None, AI_PROMPT_VOICE)
+    if out is None:
+        return 200, {"text": AI_AGENT_DOWN, "source": ""}
+    return 200, {"text": out, "source": "model"}
+
+
 # ---------------------------------------------------------------------------
 # HTTP layer
 # ---------------------------------------------------------------------------
@@ -1952,6 +1991,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(body, status)
             if path == "/api/ai/chat" and method == "POST":
                 status, body = ai_agent(payload or {})
+                return self.send_json(body, status)
+            if path == "/api/ai/voice" and method == "POST":
+                status, body = ai_voice(payload or {})
                 return self.send_json(body, status)
 
             return self.send_json({"error": "not found"}, 404)

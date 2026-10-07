@@ -612,6 +612,7 @@ const AI_PROMPT_STATEMENT_TEXT_PREFIX = "Read this statement text and return JSO
 const AI_PROMPT_AGENT = "You are the control centre of PW Budget, a bookkeeping app for a small shop. The owner types instructions here; the app is your body and the tools below are your hands. Answer with one JSON object only \u2014 no prose, no markdown: {\"reply\":\"what you say to the owner\",\"actions\":[{\"tool\":\"tool_id\",\"args\":{}}]}. Rules: use only the tools listed below and only the arguments they declare; propose at most what the instruction needs; never claim a change already happened, because every write is a proposal the owner approves by hand \u2014 write \"I will\", not \"I did\"; when you need data first, ask for the read tools and wait for the result; when the owner refuses, adjust instead of repeating yourself; when nothing fits, say so plainly and name the closest tool. Tools marked [locked] are held by a coverage switch the owner has left off: never claim you can run one, and offer propose_coverage only when widening access would actually help.";
 const AI_AGENT_OFFLINE = "I can think, but there is no model attached to this device. Add a free key under Settings \u2192 AI connection and I will take over from there.";
 const AI_AGENT_DOWN = "I could not reach the model just now \u2014 check the connection and try again.";
+const AI_PROMPT_VOICE = "You are the voice assistant of PW Budget, a budgeting app for a shop in Ghana. The owner speaks in their own language; you receive the language, a compact snapshot of the current budget, and the transcript of what was just said. Answer with one JSON object only \u2014 no prose, no markdown: {\"reply\":\"one short plain sentence in the owner's language\",\"actions\":[{\"op\":\"add_item\",\"name\":\"transport\",\"amount\":500}]}. The six actions: add_item {name, amount}, update_item {name, amount}, delete_item {name}, set_total {amount, save}, add_note {text}, ask_clarification {question}. Rules: reply in the language of the transcript, short and free of jargon; use only amounts the owner actually said \u2014 never invent an amount and never convert currencies; amounts are GH\u20b5 cedis; names for update_item and delete_item must match the snapshot exactly; if a name is missing, an amount was not spoken, or the request is unclear, send exactly one action, ask_clarification, with one short question; delete_item and set_total disturb what already exists, so add confirm true to them only when the owner clearly agreed; at most 6 actions; never claim a change was made \u2014 the app applies what it validates.";
 
 /* The device-supplied model connection. This is the offline engine's counterpart
    of server.py's AI_API_KEY / AI_BASE_URL / AI_MODEL: the owner picks a provider
@@ -929,6 +930,30 @@ async function aiAgent(payload) {
   parts.push("Conversation:\n" + lines.join("\n"));
   parts.push("Reply with the JSON object now.");
   const text = await aiChat(parts.join("\n\n"), null, AI_PROMPT_AGENT);
+  if (text === null) return [200, { text: AI_AGENT_DOWN, source: "" }];
+  return [200, { text, source: "model" }];
+}
+
+/* The voice overlay's one call — mirror of server.py ai_voice(). The panel
+   sends the transcript, the owner's language and a compact budget snapshot;
+   back comes the model's raw text for voice.js to parse and validate before
+   anything is applied. */
+async function aiVoice(payload) {
+  const transcript = payload && typeof payload.transcript === "string" ? payload.transcript : "";
+  if (!transcript.trim()) return [400, { error: AI_NOTHING_ERROR }];
+  if (!providerSet()) return [200, { text: AI_AGENT_OFFLINE, source: "heuristic" }];
+  const lang = String((payload && payload.lang) || "en").slice(0, 12);
+  const snap = payload && payload.snapshot && typeof payload.snapshot === "object" &&
+    !Array.isArray(payload.snapshot) ? payload.snapshot : {};
+  const hist = payload && Array.isArray(payload.history) ? payload.history.slice(-6) : [];
+  const parts = [];
+  if (hist.length) parts.push("Conversation:\n" + hist.map((m) =>
+    String((m && m.role) || "user") + ": " + String((m && m.content) || "").slice(0, 2000)).join("\n"));
+  parts.push("Language: " + lang);
+  parts.push("Budget snapshot: " + JSON.stringify(snap).slice(0, 4000));
+  parts.push("Transcript: " + transcript.slice(0, 2000));
+  parts.push("Reply with the JSON object now.");
+  const text = await aiChat(parts.join("\n\n"), null, AI_PROMPT_VOICE);
   if (text === null) return [200, { text: AI_AGENT_DOWN, source: "" }];
   return [200, { text, source: "model" }];
 }
@@ -1333,6 +1358,8 @@ function route(method, path, qs, body) {
     return aiStatement(body).then((r) => ({ status: r[0], body: r[1] }));
   if (path === "/api/ai/chat" && method === "POST")
     return aiAgent(body).then((r) => ({ status: r[0], body: r[1] }));
+  if (path === "/api/ai/voice" && method === "POST")
+    return aiVoice(body).then((r) => ({ status: r[0], body: r[1] }));
 
   return { status: 404, body: { error: "not found" } };
 }
