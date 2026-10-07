@@ -87,7 +87,7 @@
 /* ---- sections ---- */
 section { padding:80px 0; }
 section.soft { background:var(--bg2); border-top:1px solid var(--line-soft); border-bottom:1px solid var(--line-soft); }
-.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:18px; margin-top:40px; }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(250px,100%),1fr)); gap:18px; margin-top:40px; }
 .feature { padding:26px; transition:transform .3s, border-color .18s; }
 .feature:hover { border-color:rgba(212,175,55,.45); }
 .feature .ico { width:44px; height:44px; border-radius:12px; display:grid; place-items:center;
@@ -95,14 +95,15 @@ section.soft { background:var(--bg2); border-top:1px solid var(--line-soft); bor
 .feature h3 { font-size:16px; margin-bottom:6px; color:var(--ink); }
 .feature p { color:var(--sub); font-size:14.5px; }
 
-.steps3 { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:22px; margin-top:44px; }
+.steps3 { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(260px,100%),1fr)); gap:22px; margin-top:44px; }
 .step .n { width:42px; height:42px; border-radius:50%; background:var(--gold-grad); color:#191301;
   display:grid; place-items:center; font-weight:800; font-size:16px; margin-bottom:14px;
   box-shadow:0 10px 22px -10px rgba(212,175,55,.6); }
 .step h3 { font-size:17px; margin-bottom:6px; color:var(--ink); }
 .step p { color:var(--sub); font-size:15px; }
 
-.steps { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:22px; margin-top:40px; }
+/* min() keeps the 320px card from outrunning a 320px screen */
+.steps { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr)); gap:22px; margin-top:40px; }
 .step-card { padding:28px; }
 .step-card h3 { font-size:17px; margin-bottom:16px; display:flex; align-items:center; gap:9px; color:var(--ink); }
 .step-card ol { list-style:none; counter-reset:s; }
@@ -143,7 +144,7 @@ section.soft { background:var(--bg2); border-top:1px solid var(--line-soft); bor
 details { padding:18px 22px; margin-bottom:12px; background:linear-gradient(165deg,var(--panel),#0e0e14);
   border:1px solid var(--line-soft); border-radius:14px; }
 summary { cursor:pointer; font-weight:700; font-size:15.5px; list-style:none; color:var(--ink);
-  display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  display:flex; justify-content:space-between; align-items:center; gap:12px; min-height:44px; }
 summary::after { content:"+"; font-size:22px; color:var(--gold); font-weight:400; }
 details[open] summary::after { content:"–"; }
 details p { margin-top:12px; color:var(--sub); font-size:14.5px; }

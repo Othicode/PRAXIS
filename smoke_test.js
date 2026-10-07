@@ -50,6 +50,8 @@ class El {
     const opt = String(v).match(/<option[^>]*selected[^>]*>([^<]+)<\/option>/);
     if (opt) this.value = opt[1].trim();
   }
+  /* the assistant appends its typing indicator this way */
+  insertAdjacentHTML(pos, html) { this._html += String(html); }
   appendChild(c) { this.children.push(c); return c; }
   remove() {}
   close() {}
@@ -139,6 +141,17 @@ module.exports = {
   renderStorageBanner, openDataDialog, usingOfflineEngine,
   daysSince, ageTone, agePill, buildAlerts, renderAlerts, updateCreditBadge,
   applyTheme, currentTheme, toggleTheme,
+  get AGENT() { return AGENT; },
+  get AGENT_FILES() { return AGENT_FILES; },
+  AGENT_TOOLS, AGENT_TOOL, AGENT_VIEWS, agentTools, agentLocked, agentLockReason,
+  agentToolLines, agentParse, agentHistory, agentChips, agentBriefHtml, agentBriefing,
+  agentFollowups, agentSlipCards, agentLastUserText, agentApproveAll, agentRetry,
+  agentTurnFailed, capAgentHistory, agentAlerts, agentDashboardData,
+  loadAgent, saveAgent, renderAgent, renderAgentStatus,
+  agentOpen, agentClose, agentMic, agentToggleVoice, agentAutogrow,
+  agentPrepare, agentRunTool, agentExecute, agentDecide, agentUndo,
+  agentBuildReport, agentReportModel, pdfFromReport, docxFromReport,
+  zipStore, crc32, renderJournal, openJournal,
 };
 `);
   return require(tmp);
@@ -561,11 +574,12 @@ async function runMode(mode) {
     pw.aiAllows("capture") && pw.aiAllows("catalogue") &&
     !pw.aiAllows("money") && !pw.aiAllows("app") &&
     pw.aiScopeSummary() === "capture · catalogue");
-  await check(mode + ": settings lists free providers and every coverage area", () => {
+  await check(mode + ": settings lists every provider preset and every coverage area", () => {
     pw.renderAiSettings();
     return get("ai-provider").innerHTML.includes("groq") &&
       get("ai-provider").innerHTML.includes("gemini") &&
       get("ai-provider").innerHTML.includes("openrouter") &&
+      get("ai-provider").innerHTML.includes("deepseek") &&
       get("ai-model-list").innerHTML.length > 0 &&
       get("ai-areas").innerHTML.includes("Receipt &amp; slip capture") &&
       get("ai-areas").innerHTML.split("data-area=").length === 5 &&
@@ -627,7 +641,7 @@ async function runMode(mode) {
     get("ai-provider").value = "gemini";
     get("ai-provider").dispatch("change");
     return groqModel === "openai/gpt-oss-120b" &&
-      get("ai-model").value === "gemini-2.5-flash" &&
+      get("ai-model").value === "gemini-3.5-flash-lite" &&
       get("ai-note").textContent.length > 0;
   });
   await check(mode + ": a model id from another provider is not saved with it", () => {
@@ -636,11 +650,397 @@ async function runMode(mode) {
     get("ai-model").value = "openai/gpt-oss-120b";      // a Groq id, not Google's
     get("ai-form").dispatch("submit");
     const stored = JSON.parse(localStorage.getItem("pwbudget.ai.v1") || "{}");
-    const ok = stored.provider === "gemini" && stored.model === "gemini-2.5-flash" &&
+    const ok = stored.provider === "gemini" && stored.model === "gemini-3.5-flash-lite" &&
       pw.aiConfigured() && pw.aiStatus().text.includes("Google Gemini");
     get("ai-key").value = "";                           // leave the device clean
     get("ai-form").dispatch("submit");
     return ok;
+  });
+  await check(mode + ": the DeepSeek and OpenRouter presets carry their own ids", () => {
+    // DeepSeek is pay-per-use but browser-verified: its own base, its own
+    // model ids, and a note that does not promise a free tier.
+    get("ai-provider").value = "deepseek";
+    get("ai-provider").dispatch("change");
+    const ds = get("ai-model").value === "deepseek-v4-flash" &&
+      get("ai-base").value === "https://api.deepseek.com/v1" &&
+      get("ai-note").textContent.includes("no free tier") &&
+      get("ai-model-list").innerHTML.includes("deepseek-v4-pro");
+    // OpenRouter's datalist now reaches Claude too (verified on its live
+    // model list) — a paid id among the free ones, not on any other preset.
+    get("ai-provider").value = "openrouter";
+    get("ai-provider").dispatch("change");
+    const orv = get("ai-model-list").innerHTML.includes("anthropic/claude-haiku-4.5");
+    get("ai-provider").value = "gemini";
+    get("ai-provider").dispatch("change");
+    return ds && orv;
+  });
+
+  // ---- the assistant: the control centre over the same app ----
+  await check(mode + ": assistant opens over the app and closes again", () => {
+    pw.loadAgent();
+    pw.agentOpen();
+    const opened = get("agent-shell").classList.contains("open") &&
+      document.body.classList.contains("agent-open") &&
+      get("agent-shell").getAttribute("aria-hidden") === "false";
+    pw.renderAgent();
+    const empty = get("agent-msgs").innerHTML.includes("What should I do?");
+    pw.agentClose();
+    return opened && empty &&
+      !get("agent-shell").classList.contains("open") &&
+      !document.body.classList.contains("agent-open");
+  });
+
+  await check(mode + ": the agent's hands follow the coverage switch", () => {
+    const ids = (list) => list.map((t) => t.id).join(",");
+    const readsOnly = ids(pw.agentTools());
+    pw.setAiArea("app", true);
+    pw.setAiArea("money", true);
+    const wide = ids(pw.agentTools());
+    pw.setAiArea("app", false);
+    pw.setAiArea("money", false);
+    const back = ids(pw.agentTools());
+    return readsOnly.indexOf("create_purchase") === -1 &&
+      readsOnly.indexOf("list_income") === -1 &&
+      wide.indexOf("create_purchase") !== -1 &&
+      wide.indexOf("list_income") !== -1 &&
+      wide.indexOf("overview") !== -1 &&
+      wide.indexOf("make_report") !== -1 &&
+      back === readsOnly;
+  });
+
+  await check(mode + ": the model may speak in prose or one JSON object", () => {
+    const a = pw.agentParse('{"reply":"Records 3.","actions":[{"tool":"overview","args":{}},{"tool":"nope","args":{}}]}');
+    const b = pw.agentParse("just plain words");
+    const c = pw.agentParse('```json\n{"reply":"ok"}\n```');
+    return a.reply === "Records 3." && a.actions.length === 1 &&
+      a.actions[0].tool === "overview" &&
+      b.reply === "just plain words" && b.actions.length === 0 &&
+      c.reply === "ok" && c.actions.length === 0;
+  });
+
+  await check(mode + ": a stray closing brace does not swallow the action", () => {
+    const r = pw.agentParse('{"reply":"I will record the purchase of banners for 40 Ghana cedis.","actions":[{"tool":"create_purchase","args":{"date":"2026-10-07","distributor":"General","product":"Banners","unit":"pcs","quantity":1,"total_amount":40,"payment_method":"cash"}}]}}');
+    return r.reply === "I will record the purchase of banners for 40 Ghana cedis." &&
+      r.actions.length === 1 && r.actions[0].tool === "create_purchase" &&
+      r.actions[0].args.product === "Banners" && r.actions[0].args.total_amount === 40;
+  });
+
+  await check(mode + ": prose around the object still carries the action", () => {
+    const r = pw.agentParse('Sure thing! {"reply":"On it.","actions":[{"tool":"overview","args":{}}]} - anything else?');
+    return r.reply === "On it." && r.actions.length === 1 &&
+      r.actions[0].tool === "overview";
+  });
+
+  await check(mode + ": a cut-off reply keeps the action it had", () => {
+    const r = pw.agentParse('{"reply":"Recording now","actions":[{"tool":"create_purchase","args":{"product":"Ban');
+    return r.reply === "Recording now" && r.actions.length === 1 &&
+      r.actions[0].tool === "create_purchase" && r.actions[0].args.product === "Ban";
+  });
+
+  await check(mode + ": a read tool answers without asking first", async () => {
+    const out = await pw.agentRunTool(pw.AGENT_TOOL("overview"), {});
+    const rep = await pw.agentRunTool(pw.AGENT_TOOL("list_changes"), {});
+    return out.ok && out.text.includes("spend") && out.text.includes("owed") &&
+      rep.ok && rep.text.length > 0;
+  });
+
+  await check(mode + ": the PDF report is written in the browser", async () => {
+    const rep = await pw.agentBuildReport({ kind: "overview", format: "pdf" });
+    const b = rep.bytes;
+    const head = String.fromCharCode(b[0], b[1], b[2], b[3]);
+    const tail = new TextDecoder().decode(b.slice(Math.max(0, b.length - 240)));
+    return rep.name.startsWith("pwbudget-overview-") && rep.name.endsWith(".pdf") &&
+      rep.mime === "application/pdf" && b.length > 800 &&
+      head === "%PDF" && tail.includes("%%EOF") && tail.includes("trailer");
+  });
+
+  await check(mode + ": the Word report is a real .docx package", async () => {
+    const rep = await pw.agentBuildReport({ kind: "purchases", format: "docx" });
+    const b = rep.bytes;
+    const zip = b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04;
+    const txt = new TextDecoder().decode(b);
+    return rep.name.endsWith(".docx") &&
+      rep.mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" &&
+      zip && txt.includes("[Content_Types].xml") && txt.includes("word/document.xml");
+  });
+
+  await check(mode + ": the ZIP checksum is the standard CRC-32", () =>
+    (pw.crc32(new TextEncoder().encode("123456789")) >>> 0) === 0xCBF43926);
+
+  const agentDraft = () => ({
+    date: "2026-10-02", distributor: "Smoke Agent Ltd", product: "Ribbon",
+    unit: "roll", quantity: 2, total_amount: 500, payment_method: "Cash",
+    memo: "agent " + stamp,
+  });
+
+  await check(mode + ": a proposal is a card, not a write", async () => {
+    const before = (await apiGet("/api/purchases")).rows.length;
+    pw.setAiArea("app", true);
+    const card = await pw.agentPrepare(pw.AGENT_TOOL("create_purchase"), agentDraft());
+    const after = (await apiGet("/api/purchases")).rows.length;
+    const say = card.lines.join(" ");
+    pw.setAiArea("app", false);
+    return card.type === "ask" && card.status === "pending" && card.risk === "write" &&
+      say.includes("Smoke Agent Ltd") && say.includes("Ribbon") && say.includes("GH") &&
+      before === after;
+  });
+
+  await check(mode + ": approval writes once and the log keeps the state before it", async () => {
+    pw.setAiArea("app", true);
+    const before = (await apiGet("/api/purchases")).rows.length;
+    const card = await pw.agentPrepare(pw.AGENT_TOOL("create_purchase"), agentDraft());
+    pw.AGENT.messages.push({ role: "assistant", text: "propose", cards: [card], mid: pw.AGENT.seq++ });
+    await pw.agentDecide(card.aid, true);
+    const rows = (await apiGet("/api/purchases")).rows;
+    const mine = rows.filter((r) => r.distributor === "Smoke Agent Ltd" && r.memo === "agent " + stamp);
+    const j = pw.AGENT.journal[pw.AGENT.journal.length - 1];
+    const ok = mine.length === 1 && rows.length === before + 1 && card.status === "done" &&
+      !!j && j.tool === "create_purchase" && j.inverse && j.inverse.tool === "delete_purchase" &&
+      j.before === null && j.undone === false;
+    pw.setAiArea("app", false);
+    return ok;
+  });
+
+  await check(mode + ": the change log renders what happened", () => {
+    pw.renderJournal();
+    const html = get("journal-list").innerHTML;
+    const j = pw.AGENT.journal[pw.AGENT.journal.length - 1];
+    return html.includes("Record a purchase") && html.includes("Put it back") &&
+      html.includes("#" + j.jid) && !html.includes("undone");
+  });
+
+  await check(mode + ": a denied proposal leaves the books alone", async () => {
+    pw.setAiArea("app", true);
+    const before = (await apiGet("/api/purchases")).rows.length;
+    const card = await pw.agentPrepare(pw.AGENT_TOOL("create_purchase"),
+      Object.assign(agentDraft(), { distributor: "Smoke Denied Ltd" }));
+    pw.AGENT.messages.push({ role: "assistant", text: "propose", cards: [card], mid: pw.AGENT.seq++ });
+    await pw.agentDecide(card.aid, false);
+    const after = (await apiGet("/api/purchases")).rows.length;
+    pw.setAiArea("app", false);
+    return before === after && card.status === "denied";
+  });
+
+  await check(mode + ": undo puts back the state before a change", async () => {
+    const j = pw.AGENT.journal.filter((x) => x.tool === "create_purchase").pop();
+    if (!j) return false;
+    const before = (await apiGet("/api/purchases")).rows.length;
+    const res = await pw.agentExecute("undo_change", { jid: j.jid });
+    const after = (await apiGet("/api/purchases")).rows.length;
+    return res.ok === true && after === before - 1 && j.undone === true;
+  });
+
+  await check(mode + ": the assistant says how far it can reach", () => {
+    const statusOf = () => get("agent-status").textContent;
+    pw.renderAgentStatus();
+    const detached = statusOf();
+    // attach a key so the line can name the reach it has, then take it away
+    get("ai-provider").value = "custom";
+    get("ai-base").value = "http://127.0.0.1:9/v1";
+    get("ai-key").value = "sk-status-probe";
+    get("ai-model").value = "m";
+    get("ai-form").dispatch("submit");
+    pw.setAiArea("app", true);
+    pw.renderAgentStatus();
+    const attached = statusOf();
+    pw.setAiArea("app", false);
+    get("ai-key").value = "";
+    get("ai-form").dispatch("submit");
+    pw.renderAgentStatus();
+    return detached.includes("no model attached") &&
+      attached.includes("can read/write") &&
+      statusOf().includes("no model attached") &&
+      get("agent-fab").className.includes("agent-fab");
+  });
+
+  await check(mode + ": voice is opt-in and safe where there is no microphone", () => {
+    const read = () => JSON.parse(localStorage.getItem("pwbudget.agent.v1") || "{}").voice;
+    pw.agentToggleVoice();
+    const on = read() === true;
+    pw.agentMic();                     // no SpeechRecognition in this harness
+    pw.agentToggleVoice();
+    return on && read() === false && pw.AGENT.voice === false;
+  });
+
+  // ---- assistant v2: honest about its hands, useful between turns ----
+  await check(mode + ": locked hands are described to the model, not hidden", () => {
+    pw.setAiArea("app", false); pw.setAiArea("money", false);
+    const locked = pw.agentToolLines().find((l) => l.indexOf("create_purchase ") === 0);
+    const free = pw.agentToolLines().find((l) => l.indexOf("propose_coverage ") === 0);
+    const moneyLocked = pw.agentToolLines().find((l) => l.indexOf("list_credits ") === 0);
+    pw.setAiArea("app", true);
+    const open = pw.agentToolLines().find((l) => l.indexOf("create_purchase ") === 0);
+    pw.setAiArea("app", false);
+    return !!locked && locked.indexOf("[locked]") !== -1 && locked.indexOf("LOCKED") !== -1 &&
+      !!free && free.indexOf("[write]") !== -1 &&
+      !!moneyLocked && moneyLocked.indexOf("[locked]") !== -1 &&
+      !!open && open.indexOf("[write]") !== -1 && open.indexOf("[locked]") === -1 &&
+      pw.agentLocked().some((t) => t.id === "create_purchase") &&
+      pw.agentTools().some((t) => t.id === "propose_coverage");
+  });
+
+  await check(mode + ": the assistant may propose widening its own coverage", async () => {
+    pw.setAiArea("money", false);
+    const card = await pw.agentPrepare(pw.AGENT_TOOL("propose_coverage"), { area: "money" });
+    const line = card.lines.join(" ");
+    const res = await pw.agentExecute("propose_coverage", { area: "money" });
+    const on = pw.aiAllows("money");
+    const again = await pw.agentExecute("propose_coverage", { area: "money" });
+    pw.setAiArea("money", false);
+    return card.status === "pending" && card.risk === "write" &&
+      line.indexOf("Credit you owe") !== -1 && card.inverse && card.inverse.args.on === false &&
+      res.ok === true && on === true && again.ok === false;
+  });
+
+  await check(mode + ": the briefing says where the shop stands", async () => {
+    pw.AGENT.messages.length = 0;
+    await pw.agentBriefing();
+    pw.renderAgent();
+    const html = get("agent-msgs").innerHTML;
+    return pw.AGENT.messages.length === 0 &&
+      html.indexOf("What should I do?") !== -1 &&
+      html.indexOf("here is where the shop stands") !== -1 &&
+      (html.indexOf("Nothing needs attention") !== -1 || html.indexOf("⏱") !== -1 ||
+       html.indexOf("🔔") !== -1 || html.indexOf("🎯") !== -1 || html.indexOf("📈") !== -1) &&
+      (html.indexOf("No model attached") !== -1 || html.indexOf("Attached") !== -1 ||
+       html.indexOf("holds back") !== -1);
+  });
+
+  await check(mode + ": quick chips follow the coverage the owner set", () => {
+    pw.setAiArea("money", false);
+    const off = pw.agentChips();
+    pw.setAiArea("money", true);
+    const on = pw.agentChips();
+    pw.setAiArea("money", false);
+    const base = pw.agentTools().map((t) => t.id);
+    pw.setAiArea("app", true);
+    const withApp = pw.agentTools().map((t) => t.id);
+    pw.setAiArea("capture", false);
+    const noCapture = pw.agentTools().map((t) => t.id);
+    pw.setAiArea("capture", true);
+    pw.setAiArea("app", false);
+    return off.some((c) => c.act === "open-ai") && on.some((c) => c.text.indexOf("owe") !== -1) &&
+      base.indexOf("backup_books") !== -1 && base.indexOf("get_reminders") !== -1 &&
+      base.indexOf("navigate") !== -1 && base.indexOf("propose_coverage") !== -1 &&
+      base.indexOf("import_slip") === -1 &&
+      withApp.indexOf("import_slip") !== -1 &&
+      noCapture.indexOf("import_slip") === -1;
+  });
+
+  await check(mode + ": follow-up chips come from what just happened", () => {
+    const a = pw.agentFollowups({ cards: [{ type: "result", tool: "overview", text: "x" }] });
+    const b = pw.agentFollowups({ cards: [{ type: "ask", tool: "create_purchase", status: "pending" }] });
+    const c = pw.agentFollowups({ cards: [] });
+    return Array.isArray(a) && a.length > 0 && a.length <= 2 &&
+      a.indexOf("What do we owe right now?") !== -1 &&
+      b.length > 0 && Array.isArray(c) && c.length === 2;
+  });
+
+  await check(mode + ": a failed turn offers Try again instead of a dead end", async () => {
+    pw.AGENT.messages.length = 0;
+    pw.AGENT.messages.push({ role: "user", text: "hello", mid: pw.AGENT.seq++ },
+                           { role: "assistant", text: "down", retry: true, mid: pw.AGENT.seq++ });
+    pw.renderAgent();
+    const shown = get("agent-msgs").innerHTML.indexOf("Try again") !== -1;
+    await pw.agentRetry(pw.AGENT.messages[1].mid);
+    const clean = pw.AGENT.messages.every((m) => !m.retry) && pw.AGENT.messages.length >= 2;
+    return shown && clean &&
+      pw.agentTurnFailed({ source: "" }) === true &&
+      pw.agentTurnFailed(null) === true &&
+      pw.agentTurnFailed({ source: "heuristic", text: "x" }) === false;
+  });
+
+  await check(mode + ": one pasted slip becomes one approval card per line", async () => {
+    const cards = await pw.agentSlipCards({ text:
+      "Ceda Industrial Supplies\n2026-09-22\nDTF Powder 200 bag 21600\nCredit" });
+    const one = cards[0];
+    return cards.length >= 1 && one.type === "ask" && one.tool === "create_purchase" &&
+      one.status === "pending" && one.risk === "write" && one.lines.join(" ").indexOf("Ceda") !== -1;
+  });
+
+  await check(mode + ": a backup can be asked for and comes back as a file", async () => {
+    const out = await pw.agentRunTool(pw.AGENT_TOOL("backup_books"), {});
+    const f = out.file && pw.AGENT_FILES[out.file.fid];
+    const body = f ? JSON.parse(f.bytes) : null;
+    return out.ok === true && !!f && f.name.indexOf("pwbudget-backup-") === 0 &&
+      !!body && body.app === "pwbudget" && body.kind === "backup" &&
+      body.data && Array.isArray(body.data.purchases);
+  });
+
+  await check(mode + ": several cards can be approved in one tap", async () => {
+    pw.setAiArea("app", true);
+    const before = (await apiGet("/api/purchases")).rows.length;
+    const c1 = await pw.agentPrepare(pw.AGENT_TOOL("create_purchase"),
+      Object.assign(agentDraft(), { product: "Ribbon Bulk A", memo: "agent " + stamp }));
+    const c2 = await pw.agentPrepare(pw.AGENT_TOOL("create_purchase"),
+      Object.assign(agentDraft(), { product: "Ribbon Bulk B", memo: "agent " + stamp }));
+    const msg = { role: "assistant", text: "two lines", cards: [c1, c2], mid: pw.AGENT.seq++ };
+    pw.AGENT.messages.push(msg);
+    pw.renderAgent();
+    const offered = get("agent-msgs").innerHTML.indexOf("Approve all 2") !== -1;
+    await pw.agentApproveAll(msg.mid);
+    const rows = (await apiGet("/api/purchases")).rows;
+    const mine = rows.filter((r) => (r.memo || "").includes(stamp) &&
+      (r.product === "Ribbon Bulk A" || r.product === "Ribbon Bulk B"));
+    pw.setAiArea("app", false);
+    return offered && c1.status === "done" && c2.status === "done" &&
+      mine.length === 2 && rows.length === before + 2;
+  });
+
+  await check(mode + ": history is capped without shedding a waiting card", () => {
+    const keep = { role: "assistant", text: "wait", cards:
+      [{ type: "ask", tool: "create_purchase", status: "pending", aid: "keepme", lines: [] }],
+      mid: "keepmid" };
+    pw.AGENT.messages = [];
+    for (let i = 0; i < 140; i++) pw.AGENT.messages.push({ role: "system", hidden: true, text: "r" + i });
+    pw.AGENT.messages.push(keep);
+    pw.capAgentHistory();
+    const kept = pw.AGENT.messages.some((m) => m && m.aid === undefined && m.cards &&
+      m.cards.some((c) => c.aid === "keepme"));
+    const short = pw.AGENT.messages.length <= 120;
+    pw.AGENT.messages = [];
+    return kept && short;
+  });
+
+  await check(mode + ": the new read tools answer with something to say", async () => {
+    const rem = await pw.agentRunTool(pw.AGENT_TOOL("get_reminders"), {});
+    const cmp = await pw.agentRunTool(pw.AGENT_TOOL("compare_months"), { n: 3 });
+    const sup = await pw.agentRunTool(pw.AGENT_TOOL("top_suppliers"), { n: 3 });
+    const bud = await pw.agentRunTool(pw.AGENT_TOOL("budget_health"), {});
+    const trend = await pw.agentRunTool(pw.AGENT_TOOL("price_trend"), { product: "Nothing Like It" });
+    const search = await pw.agentRunTool(pw.AGENT_TOOL("search_income"), { q: "smoke" });
+    const missing = await pw.agentRunTool(pw.AGENT_TOOL("get_purchase"), { purchase_id: 999999 });
+    return rem.ok && rem.text.length > 0 && cmp.ok && cmp.text.indexOf("spend") !== -1 &&
+      sup.ok && bud.ok && trend.ok && search.ok &&
+      missing.ok === false && missing.error.indexOf("no purchase") !== -1;
+  });
+
+  await check(mode + ": the assistant can open a screen behind its panel", async () => {
+    const was = pw.state.view;
+    const ok = await pw.agentRunTool(pw.AGENT_TOOL("navigate"), { view: "credits" });
+    const now = pw.state.view;
+    const bad = await pw.agentRunTool(pw.AGENT_TOOL("navigate"), { view: "nowhere" });
+    if (was !== now) await pw.switchView(was);
+    return ok.ok === true && now === "credits" && bad.ok === false;
+  });
+
+  await check(mode + ": a report can be asked for a particular month", async () => {
+    const rep = await pw.agentReportModel("budget", { month: 1, year: 2026 });
+    const file = await pw.agentBuildReport({ kind: "budget", format: "pdf", month: 1, year: 2026 });
+    return rep.subtitle.indexOf("January 2026") !== -1 && file.bytes.length > 800;
+  });
+
+  await check(mode + ": /api/ai/chat replies even with no model attached", async () => {
+    const r = await fetch(BASE + "/api/ai/chat", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "hello" }],
+                             tools: [], context: "" }),
+    });
+    const j = await r.json();
+    const bad = await fetch(BASE + "/api/ai/chat", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: "{}" });
+    return r.status === 200 && typeof j.text === "string" && j.text.length > 0 &&
+      bad.status === 400;
   });
 
   // ---- money in: a person records it, or a statement proposes it ----

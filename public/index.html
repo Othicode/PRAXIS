@@ -60,7 +60,7 @@
 }
 
 /* ---- products ---- */
-.products-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(290px,1fr)); gap:22px; margin-top:46px; }
+.products-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(290px,100%),1fr)); gap:22px; margin-top:46px; }
 .product-card { padding:34px; display:flex; flex-direction:column; gap:14px; position:relative; overflow:hidden; }
 .product-card .picon { width:74px; height:74px; border-radius:18px; object-fit:cover;
   box-shadow:0 14px 30px -12px rgba(0,0,0,.7); background:#fff; }
@@ -92,7 +92,7 @@
   color:var(--sub); font-size:13.5px; letter-spacing:1px; }
 
 /* ---- contact ---- */
-.contact-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:20px; margin-top:46px; }
+.contact-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(250px,100%),1fr)); gap:20px; margin-top:46px; }
 .contact-card { padding:30px; transition:border-color .18s, transform .3s; }
 .contact-card:hover { border-color:rgba(212,175,55,.45); }
 .contact-card .ico { font-size:26px; }

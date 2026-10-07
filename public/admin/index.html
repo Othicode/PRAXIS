@@ -27,6 +27,8 @@
     font-size:15px; font-family:var(--font);
   }
   .field input:focus { outline:2px solid var(--gold); outline-offset:1px; }
+  /* iOS Safari zooms the whole viewport when a focused field is under 16px */
+  @media (max-width:900px), (pointer:coarse) { .field input { font-size:16px; } }
   .err { color:var(--red); font-size:13.5px; min-height:18px; margin:6px 0 2px; }
   .btn-full { width:100%; justify-content:center; }
 

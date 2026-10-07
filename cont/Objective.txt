@@ -1,0 +1,755 @@
+Objective
+- Finish the assistant v2 (agentic) rework — honest capability reporting + retry, richer reads/briefing/follow-ups, new human-approved write powers (paste import, backup, coverage proposal, approve-all), then polish/docs/tests — and bring it to a green, documented, uncommitted-until-approved state. All four phases (A–D) are done and all four test commands are green; docs now updated (SESSION_STATUS.md, README.md). Next: owner reviews, approves a commit, then Phase 4 (knowledge base) or live-model verification.
+Requirements
+- User wants recommendations and research rather than unilateral big changes; previously asked for web-search-verified info on free API access.
+- Approved scope for the assistant rework: full A–D; new write powers allowed but each still requires an Approve tap; NO internet search; NO bank/PSD2/POS connections ever.
+- Feature ask (AI connection): "add the fnctionality to the platform so all I need to do is go to settings, select the model provider, ie google, and pate the api key..." — done, committed caf607e.
+- Phase 0 approved with "yes"; commit approved with "Commit now (Recommended)" — committed fb8c641.
+- Commits require explicit user approval — nothing has been committed this session.
+Decisions
+- Gemini preset id stays "gemini" (label "Google"); Gemini leads the provider list and is default (only cardless free tier that reads photos). Ollama Cloud must never be a device-side provider (preflight 405, no CORS).
+- Phase 0 storage design still stands: save() records failures; db.js request() snapshots the store per POST/DELETE and rolls back answering 507; server.py mirrors 507 via _storage_error(); shared literal "storage is full — this change was not saved. Export a backup and free some space, then try again." Backup envelope {app, kind:"backup", format, exported, mode, data}; restore additive only; CSV = purchases/credits/money-in, BOM-prefixed.
+- Exactly 4 coverage areas (AI_AREAS: capture, catalogue, money, app) — never add a 5th; smoke asserts the count. Defaults on: capture, catalogue (aiAreaDefault).
+- agentTools() gates: t.area via aiAllows(area); non-read tools additionally need aiAllows("app"); the one free:true tool (propose_coverage) bypasses all gating — import_slip is therefore double-gated (capture + app).
+- Coverage-off tools are DESCRIBED to the model as "name [locked]" + "LOCKED — the owner has not switched on \"...\"" (agentLocked/agentLockReason), never hidden; AI_PROMPT_AGENT tells the model to never claim a locked hand and to offer propose_coverage only when widening access would actually help.
+- API row shape is product / total (NOT product_name / total_amount); credit info nested at row.credit (paid, balance, percent). The backup JSON envelope shape DOES use product_name/total_amount — different shapes, both correct where they live.
+- Analytics keys: months, top_items, top_by_qty, by_distributor, payment_split, unit_trend, totals.
+- AI_PROMPT_AGENT is one of the 12 CONTRACT constants in audit_calculations.js (AI_SYSTEM, image/text prompts, instruct, 2 statement prompts, AI_PROMPT_AGENT, AI_AGENT_OFFLINE, AI_AGENT_DOWN, 3 error strings) — prompt edits must be mirrored byte-for-byte in server.py and db.js.
+- Report file names stay "pwbudget-overview-…" (smoke asserts the prefix); agentReportModel now takes {month, year, branch_id} via bq filters without renaming files.
+- Voice auto-speak: new assistant replies are spoken when AGENT.voice is on, skipped on failed turns.
+- History cap (capAgentHistory in saveAgent): sheds old hidden read-results beyond 6, caps messages at 120, never drops a pending approval card.
+- Read fan-out must use bounded concurrency pool(items, fn, width=4); usingOfflineEngine is the canonical offline helper.
+- importData() (whole-store replace) deliberately has no UI — a "wipe and restore" flow is a future decision.
+Work State
+Completed
+- Commits (none pushed): aa6eb20 (phases 1–3), bed9f32 (docs), caf607e (Google-first AI connection), fb8c641 (Phase 0); last commit 4efa62e; working tree DIRTY — the assistant v2 rework (~+2000 lines) is uncommitted.
+- Assistant v2 Phase A: AGENT_TOOLS grew to 24 (get_purchase, compare_months, get_reminders, price_trend, top_suppliers, navigate, search_income, budget_health, import_slip, propose_coverage [free], backup_books; make_report args {kind, format, month?, year?, branch_id?}); locked-tool descriptions; agentTurn retry ({reply, actions, failed}, one retry 1500ms/1200ms); agentLoop marks msg.retry + breaks; capAgentHistory().
+- Assistant v2 Phase B: 8 new read cases in agentRunTool; agentBriefing() (keyless, runs on agentOpen) + agentAlerts(force, 30s cache) + agentDashboardData(); agentFollowups(msg) ≤2 chips; coverage-aware agentChips() with act:"open-ai"; agentContext() includes reminders; renderAgentStatus() appends "N locked by coverage".
+- Assistant v2 Phase C: propose_coverage (prepare/execute → setAiArea + saveAI + re-render + inverse); import_slip expands via agentSlipCards() in agentLoop; backup_books returns a file card into AGENT_FILES; agentApproveAll(mid) + agentDecide(..., {silent}); agentReportModel(kind, opts) with month/year/branch filters.
+- Assistant v2 Phase D: voice auto-speak of new replies; bindings approve-all/retry/open-ai; styles .agent-brief/.agent-follow/.agent-retry/.acard-acts.bulk; CACHE = "pwbudget-v29"; AI_PROMPT_AGENT locked-hand sentence mirrored in both engines.
+- Interface redesign (owner asked for a modern one): the assistant is now a glass drawer — dimmed/blurred scrim (tap to close), full sheet on phone / floating right card ≥760px, glass header with avatar orb + live status pill, ✦ avatars on bot rows, fade-in for new rows/cards (AGENT_SEEN/AGENT_SEEN_CARDS WeakSets), rounded capsule composer with gradient send, icon-tile approval cards, floating orb empty state, prefers-reduced-motion support. index.html shell restructured (#agent-scrim, #agent-pill, .agent-composer); all IDs kept.
+- Bug fixes found on the way: agentRowToPurchaseArgs, delete_purchase (card+detail), move_purchase, search_purchases, get_purchase and the purchases section of agentReportModel corrected to product/total with credit figures from row.credit.*; price_trend read case added to agentRunTool.
+- Provider presets extended after a platform research pass (Claude/Gemini/DeepSeek/ChatGPT, 2026-10-07): DeepSeek preset added to AI_PROVIDERS (https://api.deepseek.com/v1, ids deepseek-v4-flash / deepseek-v4-flash-vision-exp / deepseek-v4-pro from DeepSeek's own pricing docs, pay-per-use label+note — no free-tier promise, CORS preflight measured 200 from this app's origin); OpenRouter datalist gained anthropic/claude-haiku-4.5 (verified on OpenRouter's live GET /api/v1/models); Claude direct and OpenAI direct deliberately skipped (Claude needs a second wire format in both engines; OpenAI browser CORS is flaky — Responses API lost its header Jan 2026 — and neither has a free tier). aiOwnModel() needed no change: every new id sits on exactly one preset.
+- Tests: 13 new smoke checks x 2 modes (locked lines, coverage proposal, briefing, chips, follow-ups, retry, slip expansion, backup file, approve-all + cleanup, history cap, new reads, navigate, month-scoped report) + 1 preset check x 2 modes + 3 agentParse checks x 2 modes (2026-10-07) + harness exports; suites green — smoke 229 passed/0 failed, audit 173 passed/0 failed, check_static exit 0, cleanup_smoke clean.
+- Docs updated this session: docs/SESSION_STATUS.md (header, §2 counts, new "Assistant v2" section in §3, §6 rules, §7/§8 + new §3 subsection "6. Presets extended"), README.md (assistant bullet in "What the boss sees", coverage/assistant notes in "Connect a free model", provider list incl. DeepSeek, test-coverage sentence, 12 shared constants), docs/AI_AUTOMATION_PLAN.md (status line + counts), cont/Objective.txt.
+- Owner bug "approved assistant change never appears in purchases/budget/dashboard" root-caused and fixed: read-only probe of Edge's leveldb showed the owner's Gemini session on 127.0.0.1:8123 approved only propose_coverage (journal jid 1) — the follow-up reply carrying create_purchase arrived as raw JSON with one stray trailing brace (…"cash"}}]}}), so the single strict JSON.parse in agentParse threw and silently dropped the actions: no card ever existed to approve (ledger.db 0 purchases agrees). agentParse now salvages: peel stray closers incrementally, slice the object out of prose, balance a cut-off tail; unparseable text still becomes the reply. 3 new checks x 2 modes (their exact reply string, prose-wrapped, truncated) — smoke 229. Logs in docs/SESSION_STATUS.md §3.7.
+Active
+- (none — all four phases landed, presets extended, the lost-approval bug fixed at agentParse, tests green (229/173), docs updated; awaiting owner review/approval to commit.)
+Blocked
+- Real vision round-trip untested — no Gemini API key available (/api/ai/extract only ever exercised against fixtures/ai/).
+- Assistant v2 has only been exercised headless (smoke DOM stub, offline + server modes): briefing card, follow-up chips, Approve all, Try again and voice auto-speak are unverified on a handset, and the retry path has never run against a real live model (only the unreachable-endpoint case).
+Next Move
+1. Review the assistant in a browser (http://127.0.0.1:8123/app/ — server restarted this session on :8123 with the updated server.py): briefing on open, locked-hand lines, propose_coverage card, pasted-slip cards, Approve all, Try again, voice. Re-run the owner's banner test (40 GH₵ quote): after the coverage card is approved the follow-up create_purchase card must now appear even if the model's JSON is sloppy.
+2. If green, propose a commit (ask the owner first — the tree also still carries Phase 0-era work; inspect git status/diff/log before staging).
+3. Then Phase 4 (knowledge base: documents/references, /api/search, chat) per docs/SESSION_STATUS.md §8, or the still-unanswered real-key /api/ai/extract test (browser CORS now measured for all four presets incl. DeepSeek 200; only the real-key round trip is missing).
+4. Outstanding §7 gaps: first-run onboarding; admin EXPORT_KINDS CSV path still separate; no proactive free-space check.
+5. When done reviewing, stop the test server:
+Get-NetTCPConnection -LocalPort 8123 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+Relevant Files
+- public/app/app.js: AGENT_TOOLS/agentTools/agentToolLines (locked descriptions), agentTurn/agentLoop/agentRetry, agentSend helpers (agentBriefing, agentFollowups, agentSlipCards, agentChips, agentAlerts, agentDashboardData, agentLastUserText, agentFailCard), renderAgent/renderAgentStatus, agentPrepare/agentRunTool/agentExecute/agentDecide/agentApproveAll, agentReportModel/agentBuildReport, bindings, AI_AREAS/setAiArea/aiBuildContext, buildAlerts.
+- public/app/db.js: AI_PROMPT_AGENT (~612), aiAgent (~914), /api/ai/chat route (~1334) — byte-identical prompt pair with server.py.
+- server.py: AI_PROMPT_AGENT (~1126), ai_agent, purchases_query row shape (661–674), analytics (831–855).
+- public/app/index.html: agent shell markup (~602–633); public/app/styles.css: agent CSS (~1044+); public/app/sw.js: CACHE = "pwbudget-v29".
+- smoke_test.js: harness exports (~144–157), agent tests (~656–980); audit_calculations.js: CONTRACT (746) now 12 constants incl. AI_PROMPT_AGENT, ai/chat steps.
+- docs/SESSION_STATUS.md, README.md, cont/Objective.txt: handoff/owner/session docs, updated this session.
+Important Context
+- Hard rules: server.py and public/app/db.js must mirror every endpoint with identical status codes/figures/error strings and the 12 shared prompt constants; bump CACHE in sw.js on asset edits; user approval is the pattern before committing; prompts live only in the parity pair; AI key only in localStorage["pwbudget.ai.v1"]; images transient; nothing auto-commits.
+- Test commands: node audit_calculations.js (173), node smoke_test.js (229; needs server on :8123, does NOT spawn one), python tools/check_static.py (:8123, exit 0 = OK), python tools/cleanup_smoke.py.
+- Test server running in background on :8123 (restarted this session so it serves the updated server.py); URL for manual review: http://127.0.0.1:8123/app/ → 🤖 assistant.
+- Known app behavior: serverDown() permanently sets serverAvailable=false after any fetch failure (pre-existing offline-first design); harness apiGet talks to the server directly while app api() may silently be on the offline engine.
+- Groq free plan: openai/gpt-oss-120b, openai/gpt-oss-20b, qwen/qwen3.8-27b (30 RPM / 1,000 RPD / 8K TPM, text-only); OpenRouter free+vision: openrouter/free, google/gemma-4-31b-it:free, qwen/qwen3.8-27b:free, thinkingmachines/inkling:free, plus paid anthropic/claude-haiku-4.5 (id verified on OpenRouter's live model list); DeepSeek pay-per-use preset added 2026-10-07: deepseek-v4-flash / deepseek-v4-flash-vision-exp / deepseek-v4-pro on https://api.deepseek.com/v1 — CORS preflight measured 200 from this app's origin, no free tier (label/note say so). Claude direct and OpenAI direct deliberately skipped (Claude needs a second wire format in both engines; OpenAI browser CORS is flaky) — GPT stays reachable via Groq/OpenRouter.
++Thought · 25.9s
+The current file passes brace/paren/comment/declaration checks — the 16 flags come from my at-rule heuristic being wrong (it treats a keyframe selector like from as a declaration). Let me fix the check and compare against the committed version:
+← Edit~/AppData/Local/Temp/opencode/csscheck.js
+  if (p !== 0) problems.push(`line ${b.line} ("${b.sel}"): unbalanced parens (${p})`);  if (p !== 0) problems.push(`line ${b.line} ("${b.sel}"): unbalanced parens (${p})`);
+
+  const atRule = b.sel.startsWith("@");  const atRule = b.sel.startsWith("@");
+  if (atRule) {  if (atRule) {
+    const first = b.body.indexOf("{");    if (!b.body.includes("{")) { problems.push(`line ${b.line} ("${b.sel}"): at-rule with no block`); continue; }
+    // remove nested blocks by brace matching; whatever is left must be pure
+    const before = (first === -1 ? b.body : b.body.slice(0, first)).trim();    // selector text (keyframe stops, media-query rules) — a ";" there means a
+    if (before) problems.push(`line ${b.line} ("${b.sel}"): declaration inside at-rule -> "${before.slice(0, 50)}"`);    // declaration was written directly inside the at-rule.
+    if (first === -1) problems.push(`line ${b.line} ("${b.sel}"): at-rule with no block`);
+    let d2 = 0, out = "", started = false;
+    for (const ch of b.body) {
+      if (ch === "{") { d2++; started = true; continue; }
+      if (ch === "}") { d2--; continue; }
+      if (d2 === 0 && !started) out += ch;
+    }
+    if (out.includes(";")) problems.push(`line ${b.line} ("${b.sel}"): declaration inside at-rule -> "${out.trim().slice(0, 50)}"`);
+  } else {
+  } else {    if (b.body.includes("{")) problems.push(`line ${b.line} ("${b.sel}"): nested rule inside a rule`);
+    if (b.body.includes("{")) problems.push(`line ${b.line} ("${b.sel}"): nested rule inside a rule`);    for (const raw of b.body.split(";")) {
+    for (const raw of b.body.split(";")) {      const d = raw.trim();
+      const d = raw.trim();
++Thought · 22.3s
+← Edit~/AppData/Local/Temp/opencode/csscheck.js
+    if (!b.body.includes("{")) { problems.push(`line ${b.line} ("${b.sel}"): at-rule with no block`); continue; }    if (!b.body.includes("{")) { problems.push(`line ${b.line} ("${b.sel}"): at-rule with no block`); continue; }
+    // remove nested blocks by brace matching; whatever is left must be pure    // remove nested blocks by brace matching; whatever is left must be pure
+    // selector text (keyframe stops, media-query rules) — a ";" there means a    // selector text (keyframe stops, media-query rules) — a ";" there means a
+    // declaration was written directly inside the at-rule.    // declaration was written directly inside the at-rule.
+    let d2 = 0, out = "", started = false;    let d2 = 0, out = "";
+    for (const ch of b.body) {    for (const ch of b.body) {
+      if (ch === "{") { d2++; started = true; continue; }      if (ch === "{") { d2++; continue; }
+      if (ch === "}") { d2--; continue; }      if (ch === "}") { d2--; continue; }
+      if (d2 === 0 && !started) out += ch;      if (d2 === 0) out += ch;
+    }    }
+    if (out.includes(";")) problems.push(`line ${b.line} ("${b.sel}"): declaration inside at-rule -> "${out.trim().slice(0, 50)}"`);    if (out.includes(";")) problems.push(`line ${b.line} ("${b.sel}"): declaration inside at-rule -> "${out.trim().slice(0, 50)}"`);
+  } else {  } else {
+    if (b.body.includes("{")) problems.push(`line ${b.line} ("${b.sel}"): nested rule inside a rule`);    if (b.body.includes("{")) problems.push(`line ${b.line} ("${b.sel}"): nested rule inside a rule`);
++Thought · 3.3s
+$ cmd /c "git show HEAD:public/app/styles.css > %TEMP%\opencode\styles_before.css"; node "C:\Users\USER\AppData\Local\Temp\opencode\csscheck.js" "$env:TEMP\opencode\styles_before.css"; node "C:\Users\USER\AppData\Local\Temp\opencode\csscheck.js" "C:\Users\USER\Documents\PWBudget\public\app\styles.css"
+file: C:\Users\USER\AppData\Local\Temp\opencode\styles_before.css
+blocks: 611 | declarations: 2074 | comments: 81
+OK — balanced braces/parens, comments closed, every declaration parses.
+file: C:\Users\USER\Documents\PWBudget\public\app\styles.css
+blocks: 621 | declarations: 2104 | comments: 98
+OK — balanced braces/parens, comments closed, every declaration parses.
++Thought · 40.9s
+Both versions validate cleanly (611→621 blocks). Now let me rigorously find every rule that could set a form control below 16px — my earlier grep was line-based and would miss multi-line rules:
+# Wrote~/AppData/Local/Temp/opencode/fontsizes.js
+/* List every rule that sets font-size < 16px on something that can match a
+   form control (the iOS auto-zoom trigger), plus every form-control rule. */
+const fs = require("fs");
+const css = fs.readFileSync(process.argv[2], "utf8").replace(/\/\*[\s\S]*?\*\//g, (m) => " ".repeat(m.length));
+
+let sel = "", depth = 0, blocks = [];
+for (let k = 0; k < css.length; k++) {
+  const c = css[k];
+  if (c === "{") { blocks.push({ sel: sel.replace(/\s+/g, " ").trim(), body: "", inner: depth }); depth++; sel = ""; }
+  else if (c === "}") { depth--; const b = blocks[blocks.length - 1 - 0]; sel = ""; }
+  else if (depth === 0) { if (c === ";") sel = ""; else sel += c; }
+}
+// simpler second pass: capture bodies properly
+blocks = [];
+{
+  const stack = [];
+  let s = "";
+  for (let k = 0; k < css.length; k++) {
+    const c = css[k];
+    if (c === "{") { stack.push({ sel: s.replace(/\s+/g, " ").trim(), start: k }); s = ""; }
+    else if (c === "}") { const b = stack.pop(); if (b) { b.body = css.slice(b.start + 1, k); blocks.push(b); } s = ""; }
+    else if (c === ";") s = "";
+    else s += c;
+  }
+}
+
+const FORM = /(^|[\s,])(input|select|textarea|button)\b|\b(input|select|textarea)\b/;
+const out = [];
+for (const b of blocks) {
+  if (b.sel.startsWith("@")) continue;
+  const m = b.body.match(/font-size:\s*([\d.]+)px/g) || [];
+  for (const decl of m) {
+    const px = parseFloat(decl.match(/([\d.]+)px/)[1]);
+    out.push({ px, sel: b.sel, isForm: FORM.test(b.sel) });
+  }
+}
+out.sort((a, b) => a.px - b.px);
+console.log("=== rules with font-size < 16px, form-control selectors first ===");
+for (const r of out.filter((r) => r.isForm)) console.log(`  ${String(r.px).padStart(5)}px  FORM  ${r.sel}`);
+console.log("=== rules with font-size < 16px, NON-form selectors ===");
+for (const r of out.filter((r) => !r.isForm)) console.log(`  ${String(r.px).padStart(5)}px        ${r.sel}`);
+
++Thought · 7.4s
+$ node "C:\Users\USER\AppData\Local\Temp\opencode\fontsizes.js" "C:\Users\USER\Documents\PWBudget\public\app\styles.css"
+(128 earlier lines)
+     19px        .ck.op
+     19px        .welcome-hello
+     20px        .more-sheet .nav-btn .nav-ico
+     20px        .calc-fab
+     22px        .kpi .k-value
+     24px        .calc-fab
+     26px        #btn-new
++Thought · 35.7s
+The audit is complete and confirms only the three controls I already fixed could trigger iOS zoom. Let me verify font: inherit rules (which can also drop a control below 16px) and confirm my desktop overrides landed in the right block:
+$ Select-String -Path public/app/styles.css -Pattern 'font: inherit' | ForEach-Object { "$($_.LineNumber): $($_.Line.Trim())" }; "=== desktop block: my two overrides ==="; Select-String -Path public/app/styles.css -Pattern 'compact type size|branch-pick select \{ width: auto' -Context 1,1 | ForEach-Object { "  $…
+(10 earlier lines)
+        .offline-badge .ob-short { display: none; }
+        /* the compact type size the phone gives up to keep iOS from zooming in */
+  1035: /* the compact type size the phone gives up to keep iOS from zooming in */
+        .branch-pick select { width: auto; min-width: 130px; font-size: 13px; }
+        .paste-box textarea, .stmt-text { font-size: 13px; }
+=== intro lifecycle ===
++Thought · 13.4s
+$ $c = Get-Content public/app/styles.css; "line 140-145:"; $c[139..144] | ForEach-Object { "  $_" }; "line 740-746:"; $c[739..745] | ForEach-Object { "  $_" }; "=== intro ==="; Select-String -Path public/app/styles.css -Pattern '^\.intro|introOut|introStage|^\.intro-' -Context 0,8 | ForEach-Object { "line $($_.L…
+(118 earlier lines)
+       .intro-stage { animation-duration: .01ms; }
+       *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+     }
+     
+     /* ---- money in: list + statement ingest ---- */
+     .import-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
++Thought · 19.7s
+$ Select-String -Path public/app/index.html, public/app/app.js, public/app/sw.js -Pattern 'intro' | ForEach-Object { "$(Split-Path $_.Path -Leaf) $($_.LineNumber): $($_.Line.Trim().Substring(0,[Math]::Min(120,$_.Line.Trim().Length)))" }
+(5 earlier lines)
+index.html 49: <div class="intro-tag">we think   we create   we do</div>
+index.html 51: <div class="intro-stage intro-pw">
+index.html 52: <svg class="intro-mark" viewBox="0 0 512 512" aria-hidden="true">
+index.html 66: <div class="intro-word">PW Budget</div>
+index.html 67: <div class="intro-tag">stock   credit   budget</div>
+index.html 73: var i = document.getElementById("intro");
++Thought · 904ms
+→Explored — 1 read
++Thought · 20.5s
+The intro is intentionally timed and self-removing — not a defect. Let me check the last few positioned elements, then bump the service-worker cache (required for any asset edit):
+$ Select-String -Path public/app/styles.css -Pattern '^\.(ai-strip|welcome|import-bar|stmt-rows|review-card|pager|filters) \{' -Context 0,7 | ForEach-Object { "line $($_.LineNumber): $($_.Line.Trim())"; $_.Context.PostContext | ForEach-Object { "     $_" } }; "=== sw cache ==="; Select-String -Path public/app/sw…
+(52 earlier lines)
+     .stmt-row {
+       display: grid; grid-template-columns: auto auto auto 1fr auto auto; gap: 8px;
+       align-items: center; padding: 8px 11px;
+       border: 1px solid var(--line); border-radius: 11px; background: var(--panel2);
+=== sw cache ===
+4: const CACHE = "pwbudget-v23";
++Thought · 12.2s
+All remaining elements are in-flow and correctly sized. Now bumping the service-worker cache (required rule for any asset edit) and running the full test suite:
+← Editpublic\app\sw.js
+/* PW Budget - service worker/* PW Budget - service worker
+   Cache-first: the installed app loads instantly and works with NO internet.   Cache-first: the installed app loads instantly and works with NO internet.
+   Bump CACHE when you ship updates so old caches are cleaned automatically. */   Bump CACHE when you ship updates so old caches are cleaned automatically. */
+const CACHE = "pwbudget-v23";const CACHE = "pwbudget-v24";
+const ASSETS = [const ASSETS = [
+  "./",  "./",
+  "./index.html",  "./index.html",
+  "./app.js",  "./app.js",
++Thought · 1.3s
+$ Select-String -Path *.js, *.py, public\app\*.js, docs\*.md, README.md -Pattern 'pwbudget-v2' | ForEach-Object { "$(Split-Path $_.Path -Leaf) $($_.LineNumber): $($_.Line.Trim())" }
+sw.js 4: const CACHE = "pwbudget-v24";
+AI_AUTOMATION_PLAN.md 69: | `sw.js` | Cache-first service worker, `CACHE = "pwbudget-v20"` (bump on every update); `/api/*` is network-first |
+SESSION_STATUS.md 147: **`public/app/sw.js`** - `CACHE = "pwbudget-v21"` (bump on *every* asset edit).
+SESSION_STATUS.md 208: functions. `CACHE = "pwbudget-v23"`.
+SESSION_STATUS.md 245: - `CACHE` bumped to `pwbudget-v22`; 2 new smoke checks x 2 modes (152).
++Thought · 27.1s
+$ node audit_calculations.js; "AUDIT_EXIT=$LASTEXITCODE"; node smoke_test.js; "SMOKE_EXIT=$LASTEXITCODE"; python tools/check_static.py; "STATIC_EXIT=$LASTEXITCODE"; python tools/cleanup_smoke.py; "CLEANUP_EXIT=$LASTEXITCODE"
+(206 earlier lines)
+STATIC_EXIT=0
+branches : ['Main Shop']
+distribs : 0
+products : 0
+purchases: 0 | credits: 0
+CLEANUP_EXIT=0
++Thought · 2.8s
+All four suites green (160 audit, 165 smoke, static exit 0, store clean). Now a full line-by-line review of the diff — with no browser, this read is the verification:
+$ cmd /c "git diff -- public/app/styles.css public/app/sw.js > %TEMP%\opencode\uidiff.txt"; (Get-Content "$env:TEMP\opencode\uidiff.txt").Count
+warning: in the working copy of 'public/app/styles.css', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'public/app/sw.js', LF will be replaced by CRLF the next time Git touches it
+310
++Thought · 526ms
+→Explored — 1 read
++Thought · 1m 2s
+Two holes remain in my own fix: a large phone in landscape (932px) hits the ≥900px block and would get 13px controls and 36px buttons back. Let me verify the calc markup first, then close both holes with pointer-based queries:
+$ Select-String -Path public/app/index.html -Pattern 'calc-shell|calc-head|calc-screen|calc-keys|calc-foot' | ForEach-Object { "$($_.LineNumber): $($_.Line.Trim())" }; "=== calc classes declared in css ==="; Select-String -Path public/app/styles.css -Pattern '^\.calc-[a-z]+ \{' | ForEach-Object { "$($_.LineNumbe…
+(10 earlier lines)
+934: .calc-head {
+942: .calc-screen {
+947: .calc-expr { color: var(--muted); font-size: 12.5px; min-height: 16px; word-break: break-all; }
+948: .calc-display { font-size: clamp(26px, 8vw, 34px); font-weight: 700; line-height: 1.1; word-break: break-all; }
+949: .calc-keys { display: grid; grid-template-columns: repeat(5, 1fr); gap: 7px; padding: 12px; }
+963: .calc-foot { text-align: center; color: var(--muted); font-size: 11px; padding: 0 0 10px; }
++Thought · 6.2s
+→Explored — 1 read
++Thought · 47.4s
+.calc-screen/.calc-head/.calc-foot declare no flex shorthand, so my rules stand. But the read exposed an ordering bug in my own change: .stmt-text's base rule sits after the desktop block, so my 13px restore there would lose. Let me check the file end:
+→Explored — 1 read
++Thought · 9.8s
+$ Select-String -Path public/app/styles.css -Pattern 'min-height:\s*(\d+)px' | ForEach-Object { $v=[int]([regex]::Match($_.Line,'min-height:\s*(\d+)px').Groups[1].Value); if($v -lt 44){ "$($_.LineNumber): [$v] $($_.Line.Trim())" } }
+(2 earlier lines)
+725: [32] cursor: pointer; min-height: 32px;
+739: [34] width: 100%; min-height: 34px;
+832: [40] cursor: pointer; transition: all .15s; min-height: 40px;
+897: [14] #data-progress { display: block; margin-top: 8px; min-height: 14px; }
+940: [38] .calc-head-right .btn { background: rgba(212,175,55,.16); color: var(--gold-hi); border: none; min-height: 38px; }
+947: [16] .calc-expr { color: var(--muted); font-size: 12.5px; min-height: 16px; word-break: break-all; }
++Thought · 1m 41s
+Let me systematically compute the height of every form control (padding ×2 + line-height + border) to find all sub-44px touch targets, rather than guessing:
+# Wrote~/AppData/Local/Temp/opencode/ctlheight.js
+/* Estimate the rendered height of every rule that styles a form control:
+   height ~= padding-top + padding-bottom + font-size * 1.2 + border * 2 */
+const fs = require("fs");
+const css = fs.readFileSync(process.argv[2], "utf8").replace(/\/\*[\s\S]*?\*\//g, (m) => " ".repeat(m.length));
+
+const blocks = [];
+{ const st = []; let s = "";
+  for (let k = 0; k < css.length; k++) {
+    const c = css[k];
+    if (c === "{") { st.push({ sel: s.replace(/\s+/g, " ").trim(), start: k }); s = ""; }
+    else if (c === "}") { const b = st.pop(); if (b) { b.body = css.slice(b.start + 1, k); blocks.push(b); } s = ""; }
+    else if (c === ";") s = ""; else s += c;
+  } }
+
+const isForm = (sel) => /(^|[\s,>])(input|select|textarea)(\b|[,.\s:#[])|input\[|select\b|textarea\b/.test(sel);
+const num = (v) => (v === undefined ? NaN : parseFloat(v));
+
+const rows = [];
+for (const b of blocks) {
+  if (b.sel.startsWith("@") || !isForm(b.sel)) continue;
+  const body = b.body;
+  const fs_ = body.match(/font-size:\s*([\d.]+)px/);
+  if (!fs_) continue;                       // only rules that set their own size
+  const size = parseFloat(fs_[1]);
+
+  let pt = 0, pb = 0;
+  const pad = body.match(/(?:^|[^-])padding:\s*([^;]+);/);
+  if (pad) {
+    const parts = pad[1].trim().split(/\s+/).map((p) => (p.includes("(") ? NaN : parseFloat(p)));
+    if (parts.length === 1) { pt = pb = parts[0]; }
+    else if (parts.length === 2) { pt = pb = parts[0]; }
+    else if (parts.length === 3) { pt = parts[0]; pb = parts[2]; }
+    else if (parts.length >= 4) { pt = parts[0]; pb = parts[2]; }
+  }
+  const ptT = body.match(/padding-top:\s*([\d.]+)px/); if (ptT) pt = parseFloat(ptT[1]);
+  const pbT = body.match(/padding-bottom:\s*([\d.]+)px/); if (pbT) pb = parseFloat(pbT[1]);
+
+  const borders = (body.match(/border(?:-\w+)?:\s*[^;]*?\b(\d+(?:\.\d+)?)px\b/g) || [])
+    .map((d) => parseFloat(d.match(/(\d+(?:\.\d+)?)px/)[1]));
+  const border = borders.length ? Math.max(...borders) * (borders.length >= 2 ? 2 : 1) : 0;
+
+  if (Number.isNaN(pt) || Number.isNaN(pb)) { rows.push({ b, size, h: NaN, note: "non-px padding" }); continue; }
+  rows.push({ sel: b.sel, size, h: pt + pb + size * 1.2 + border });
+}
+rows.sort((a, b) => a.h - b.h);
+for (const r of rows) {
+  const h = Number.isNaN(r.h) ? "  ?" : r.h.toFixed(0).padStart(4);
+  const flag = Number.isNaN(r.h) ? "???" : r.h < 44 ? "<44" : "   ";
+  console.log(`${flag} ${h}px  ${r.size}px  ${r.sel.slice(0, 90)}`);
+}
+
++Thought · 3.8s
+← Edit~/AppData/Local/Temp/opencode/ctlheight.js
+for (const b of blocks) {for (const b of blocks) {
+  if (b.sel.startsWith("@") || !isForm(b.sel)) continue;  if (b.sel.startsWith("@") || !isForm(b.sel)) continue;
+  const body = b.body;  const body = b.body;
+  const fs_ = body.match(/font-size:\s*([\d.]+)px/);  const fs_ = body.match(/font-size:\s*([\d.]+)px/);
+  if (!fs_) continue;                       // only rules that set their own size  const size = fs_ ? parseFloat(fs_[1]) : 16;   // the base rule gives every control 16px
+  const size = parseFloat(fs_[1]);
+
+  let pt = 0, pb = 0;  let pt = 0, pb = 0;
+  const pad = body.match(/(?:^|[^-])padding:\s*([^;]+);/);  const pad = body.match(/(?:^|[^-])padding:\s*([^;]+);/);
+  if (pad) {  if (pad) {
++Thought · 2.9s
+$ node "C:\Users\USER\AppData\Local\Temp\opencode\ctlheight.js" "C:\Users\USER\Documents\PWBudget\public\app\styles.css"
+(14 earlier lines)
+      51px  16px  .branch-pick select
+      51px  16px  .alloc-row input[type="number"]
+      61px  16px  .filters input[type="search"], .filters input[type="text"]
+      61px  16px  .filters select
+      61px  16px  .budget-form input, .budget-form select, .branch-add input
+      61px  16px  .paste-box textarea
+      63px  16px  .form-grid input, .form-grid select
++Thought · 1m 36s
+My height tool conflates override fragments and miscounts border-radius, so I'll reason from the actual paddings instead: .branch-pick select is 35px, .filters fields 43px, .form-grid fields 45px. Three precise edits:
+← Editpublic\app\styles.css
+  .top-actions { flex-wrap: wrap; gap: 10px; padding-bottom: 0; }  .top-actions { flex-wrap: wrap; gap: 10px; padding-bottom: 0; }
+  .branch-pick-lbl { display: inline; }  .branch-pick-lbl { display: inline; }
+  .offline-badge .ob-long { display: inline; }  .offline-badge .ob-long { display: inline; }
+  .offline-badge .ob-short { display: none; }  .offline-badge .ob-short { display: none; }
+  .branch-pick select { width: auto; min-width: 130px; font-size: 13px; }  .branch-pick select { width: auto; min-width: 130px; }
+  /* the compact type size the phone gives up to keep iOS from zooming in */
+  .paste-box textarea, .stmt-text { font-size: 13px; }
+  .profile-chip { max-width: 210px; padding: 4px 12px 4px 4px; }
+  .profile-chip .profile-meta { display: flex; }
+  .profile-chip .profile-meta strong, .profile-chip .profile-meta small { max-width: 140px; }  .profile-chip { max-width: 210px; padding: 4px 12px 4px 4px; }
+  .profile-chip .profile-meta { display: flex; }
+  .profile-chip .profile-meta strong, .profile-chip .profile-meta small { max-width: 140px; }
+
++Thought · 10.5s
+← Editpublic\app\styles.css
+  .kpis { grid-template-columns: 1fr; }  .kpis { grid-template-columns: 1fr; }
+}}
+
+/* ============================================================/* ============================================================
+   Thumbs, not cursors. Every tappable control reaches 44px on a phone   Thumbs, not cursors. On a touch screen every control that triggers an
+   (Apple HIG / Material); the compact sizes above stay on desktop, where a   action reaches 44px (Apple HIG / Material) — the size this app already
+   mouse does the tapping.
+   uses for .btn, .nav-btn (50px), the calculator keys (46px) and .check.
+   The width catches a phone in portrait; (pointer: coarse) catches a tablet
+   or a phone held sideways, which lands in the ≥900px desktop layout.
+   ============================================================ */   ============================================================ */
+@media (max-width: 899px) {@media (max-width: 899px), (pointer: coarse) {
+  .btn.small { min-height: 44px; }              /* dialog ✕, CSV, profile Open */  /* every field and picker, whatever padding its own rule styled it with
+  .seg-btn { min-height: 44px; }                /* appearance switch */
+  .icon-btn, .row-actions .icon-btn { min-height: 44px; }   /* row Pay/Move/Delete, sheet ✕ */     (the header switcher is 35px, the date filters 43px) */
+  .u-chip { min-height: 44px; }                 /* review-card option chips */  input:not([type="checkbox"]):not([type="radio"]), select { min-height: 44px; }
+  .btn.small { min-height: 44px; }                         /* dialog ✕, CSV, profile Open */
+  .icon-btn, .row-actions .icon-btn { min-height: 44px; }  /* row Pay/Move/Delete, sheet ✕ */
+  .seg-btn { min-height: 44px; }                           /* appearance switch */
+  .u-chip { min-height: 44px; }                            /* review-card option chips */
+  .ai-strip { min-height: 44px; }                          /* the AI status bar */
+  .calc-head-right .btn { min-height: 44px; }              /* calculator head controls */
+  .stmt-row { min-height: 44px; }                          /* statement candidate rows */
+  .theme-btn { width: 44px; height: 44px; }                /* header theme switch */
+  .profile-chip { min-height: 44px; }                      /* header identity pill */
+}
+
+/* ============================================================
+   Medium screens (large phones / tablets held in portrait)
+
+
+
+}
+
+/* ============================================================
+   Medium screens (large phones / tablets held in portrait)
++Thought · 11.0s
+← Editpublic\app\styles.css
+/* the money-in KPI on the dashboard is a shortcut, so it must read as one *//* the money-in KPI on the dashboard is a shortcut, so it must read as one */
+.kpi[data-goto] { cursor: pointer; }.kpi[data-goto] { cursor: pointer; }
+.kpi[data-goto]:hover { border-color: var(--line2); }.kpi[data-goto]:hover { border-color: var(--line2); }
+
+@media (max-width: 760px) {@media (max-width: 760px) {
+  .stmt-row { grid-template-columns: auto auto auto 1fr; }  .stmt-row { grid-template-columns: auto auto auto 1fr; }
+  .stmt-amt { grid-column: 4; text-align: right; }  .stmt-amt { grid-column: 4; text-align: right; }
+  .stmt-ref { grid-column: 2 / -1; }  .stmt-ref { grid-column: 2 / -1; }
+}}
+
+/* ---- type size: 16px is the default, a mouse gets the compact one ----
+   Safari on iOS jumps the viewport into any control under 16px when it takes
+   focus, which throws a bottom sheet off-screen mid-typing. So 16px is what
+   the base rules above hand out and it is the desktop that opts into 13px —
+   split on the pointer, not the width, because a tablet or a phone held
+   sideways also lands in the ≥900px layout. Last in the file so source order
+   beats the base .stmt-text rule declared earlier. */
+@media (min-width: 900px) and (pointer: fine) {
+  .branch-pick select, .paste-box textarea, .stmt-text { font-size: 13px; }
+}
+
+
+
+
+
+
++Thought · 27.6s
+One hole left: the desktop block sets input, select, textarea { 14px } for all fields at ≥900px — which a large phone or tablet in landscape also reaches. Let me make the pointer split airtight:
+← Editpublic\app\styles.css
+  .stmt-amt { grid-column: 4; text-align: right; }  .stmt-amt { grid-column: 4; text-align: right; }
+  .stmt-ref { grid-column: 2 / -1; }  .stmt-ref { grid-column: 2 / -1; }
+}}
+
+/* ---- type size: 16px is the default, a mouse gets the compact one ----/* ---- type size follows the pointer, not the screen ----
+   Safari on iOS jumps the viewport into any control under 16px when it takes
+   focus, which throws a bottom sheet off-screen mid-typing. So 16px is what   16px is the default everywhere: Safari on iOS jumps the viewport into any
+   the base rules above hand out and it is the desktop that opts into 13px —   control under 16px when it takes focus, which throws a bottom sheet
+   split on the pointer, not the width, because a tablet or a phone held
+   off-screen mid-typing. A mouse-driven desktop opts into the compact size.
+   sideways also lands in the ≥900px layout. Last in the file so source order   Last in the file so source order beats the base rules declared earlier. */
+   beats the base .stmt-text rule declared earlier. */
+@media (min-width: 900px) and (pointer: fine) {
+  .branch-pick select, .paste-box textarea, .stmt-text { font-size: 13px; }
+}@media (min-width: 900px) and (pointer: fine) {
+  .branch-pick select, .paste-box textarea, .stmt-text { font-size: 13px; }
+}
+@media (min-width: 900px) and (pointer: coarse) {
+  /* a tablet or a phone held sideways also lands in the ≥900px layout, but
+     its screen is still being poked — keep the phone type size there */
+  input, select, textarea { font-size: 16px; }
+}
+
++Thought · 13.6s
+$ node "C:\Users\USER\AppData\Local\Temp\opencode\csscheck.js" "C:\Users\USER\Documents\PWBudget\public\app\styles.css"; "---"; node "C:\Users\USER\AppData\Local\Temp\opencode\fontsizes.js" "C:\Users\USER\Documents\PWBudget\public\app\styles.css" | Select-Object -First 12
+(10 earlier lines)
+     16px  FORM  input, select, textarea
+=== rules with font-size < 16px, NON-form selectors ===
+     10px        .branch-pick-lbl
+     10px        .nav-badge
+     10px        .live .lv label
+     10px        .stmt-dir
++Thought · 13.8s
+Validation clean (630 blocks, all declarations parse). Re-running the full suite after these edits and regenerating the diff for a final read:
+$ node audit_calculations.js 2>&1 | Select-Object -Last 3; node smoke_test.js 2>&1 | Select-Object -Last 3; python tools/check_static.py > $null; "STATIC_EXIT=$LASTEXITCODE"; python tools/cleanup_smoke.py; cmd /c "git diff -- public/app/styles.css public/app/sw.js > %TEMP%\opencode\uidiff2.txt"; "DIFF_LINES=" + …
+(11 earlier lines)
+warning: in the working copy of 'public/app/styles.css', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'public/app/sw.js', LF will be replaced by CRLF the next time Git touches it
+DIFF_LINES=327
+STATUS:
+ M public/app/styles.css
+ M public/app/sw.js
++Thought · 7.0s
+All green again (160 / 165 / exit 0 / clean store), and only the two intended files changed. Final read of the diff regions I edited after the last review:
+→Explored — 1 read
++Thought · 27.0s
+The diff is correct end-to-end. Let me check the handoff doc, which records the cache version as current state:
+$ Select-String -Path docs\SESSION_STATUS.md -Pattern 'pwbudget-v23|sw\.js' -Context 2,2 | ForEach-Object { "line $($_.LineNumber): $($_.Line.Trim())"; "  BEFORE:"; $_.Context.PreContext | ForEach-Object { "    $_" }; "  AFTER:"; $_.Context.PostContext | ForEach-Object { "    $_" } }
+(14 earlier lines)
+line 304: - Bump `CACHE` in `public/app/sw.js` whenever `app.js`/`db.js`/`styles.css`/
+  BEFORE:
+      whitelist** over model output as over user text - never trust a model field
+      name directly.
+  AFTER:
+      `index.html` change (cache-first SW).
++Thought · 5.3s
+$ Select-String -Path docs\SESSION_STATUS.md -Pattern '^#{1,3} ' | ForEach-Object { "$($_.LineNumber): $($_.Line)" }
+(8 earlier lines)
+161: ### Phase 0 - your data, out loud ? (this session, not yet committed)
+212: ## 4. What was outstanding - now DONE (2026-10-05)
+226: ### 5. Provider presets fixed (2026-10-05) - Google first
+253: ## 5. Environment / tooling gotchas (cost real time this session)
+277: ## 6. Rules that must keep holding
+309: ## 7. Known blockers / deferred work
+340: ## 8. Next phase (not started)
++Thought · 7.9s
+→Explored — 1 read
++Thought · 4.7s
+$ git log --oneline -6; "---"; git status --short
+(2 earlier lines)
+bed9f32 docs: mark phase 3 README edits and the phases 1-3 commit as done in the handoff notes
+aa6eb20 AI capture pipeline phases 1-3: ai routes, slip capture, AI-native surface, income + statement ingest
+158e377 docs: record project summary and AI/automation direction
+ac5702f Fix calculator subtraction and harden the calculation layer
+---
+ M public/app/styles.css
+ M public/app/sw.js
++Thought · 18.0s
+→Explored — 1 read
++Thought · 15.2s
+Now the handoff doc — three edits: a stale "not yet committed" marker, the record of this work, and the tooling gotcha that shaped it:
+← Editdocs\SESSION_STATUS.md
+`memo LIKE 'smoke-%' OR reference LIKE 'SMK%' OR source LIKE 'Smoke takings%'`.`memo LIKE 'smoke-%' OR reference LIKE 'SMK%' OR source LIKE 'Smoke takings%'`.
+
+------
+
+### Phase 0 — your data, out loud ✅ (this session, not yet committed)### Phase 0 — your data, out loud ✅ (this session, committed as `fb8c641`)
+
+Two halves: a write that cannot be stored must never look saved, and the owner
+Two halves: a write that cannot be stored must never look saved, and the ownermust be able to take their records with them.
+must be able to take their records with them.
+
++Thought · 6.3s
+← Editdocs\SESSION_STATUS.md
+functions. `CACHE = "pwbudget-v23"`.functions. `CACHE = "pwbudget-v23"`.
+
+------
+
+### Mobile UI pass — sheets, thumbs, insets ✅ (this session)
+
+No browser is attached to this session (§5), so this was found by parsing
+`styles.css` rather than by looking at it. Four defects:
+
+| Was broken on a phone | Fix |
+|---|---|
+| `dialog { padding: 0 }` sat on the *forms* — Money in, AI settings and **Your data** rendered flush to the screen edge with no room for the home bar | the sheet owns the padding, the forms are `padding: 0`, so a dialog with no form wrapper is indented like one with |
+| The More sheet is ~430px tall and had no `max-height`: held sideways its first entries sat off the top, unreachable | `max-height: calc(100dvh - 10px)` + scroll, `overscroll-behavior: contain` |
+| The keypad is `overflow: hidden` inside a `76vh` shell — a phone sideways lost its bottom keys | keys are the only flexible child (`flex: 1 1 auto; min-height: 0; overflow-y: auto`), head/screen/foot pinned |
+| `.branch-pick select` and both statement textareas were 13px, which makes **Safari on iOS jump the viewport** into them on focus | 16px everywhere; 13px comes back only at `≥900px and (pointer: fine)` |
+
+Also: `92vh`/`76vh` → `dvh` (plain `vh` is the *tall* viewport, so a sheet can
+overrun the screen while Safari's bar is showing); `--safe-l`/`--safe-r` folded
+into `--gutter-l`/`--gutter-r` on the header, tab bar, main, both sheets, the
+toast, the banners and the two FABs, so a notched phone held sideways doesn't
+hide them behind the camera (no-ops in portrait); `.top-actions` made shrinkable
+— at 320px with the Offline badge up, the header pushed the page sideways; and
+`.storage-banner` given its own desktop slot, since it had inherited a tab-bar
+offset for a layout that has no tab bar.
+
+**44px is the floor on touch** — `@media (max-width: 899px), (pointer: coarse)`
+lifts `.btn.small`, the row Pay/Move/Delete icons, `.seg-btn`, the review chips,
+the AI strip, the calculator head buttons, statement rows, the theme switch and
+the identity pill to 44px, and puts `min-height: 44px` under every field and
+picker. The rest of the app already sat at 44–58px (`.btn`, `.nav-btn` 50, the
+calculator keys 46, `.check` 44) — these were the outliers. **The pointer, not
+the width, decides**, because a tablet or a phone turned sideways lands in the
+≥900px desktop layout while still being poked with a finger.
+
+`CACHE = "pwbudget-v24"`. Tests unchanged (160 audit / 165 smoke) — none of
+this is observable to them; the only proof that matters is a real handset.
+
+---
+
+## 4. What was outstanding — now DONE (2026-10-05)
+
+1. **README Phase 3 edits — done.** Added `income` to the data model, the
+   three `/api/income` routes to the API list, a **Money in** bullet under
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## 4. What was outstanding — now DONE (2026-10-05)
+
+1. **README Phase 3 edits — done.** Added `income` to the data model, the
+   three `/api/income` routes to the API list, a **Money in** bullet under
++Thought · 3.2s
+← Editdocs\SESSION_STATUS.md
+  then reads the local store instead of the server. In tests this shows up as  then reads the local store instead of the server. In tests this shows up as
+  "why does server mode suddenly see an empty/old store?"; the symptom is a  "why does server mode suddenly see an empty/old store?"; the symptom is a
+  handful of `PW Budget: server API unreachable` warnings. Keep read fan-out  handful of `PW Budget: server API unreachable` warnings. Keep read fan-out
+  bounded (`pool(items, fn, 4)`).  bounded (`pool(items, fn, 4)`).
+- **No desktop browser is attached to this session** — `browser.tabs.list()`
+  answers `[browser.disconnected]`, and repeating it does not help. Visual work
+  has to be reasoned out of the source and validated by *parsing* it (brace /
+  paren / comment balance, every declaration parses, an audit of every rule that
+  can size a control). Say plainly that nothing was seen rather than implying
+  it was; the check that still needs a handset is in §7.
+
+---
+
+## 6. Rules that must keep holding
+
+
+---
+
+## 6. Rules that must keep holding
++Thought · 2.0s
+$ Select-String -Path docs\SESSION_STATUS.md -Pattern '^## 7\.|^## 8\.' | ForEach-Object { $_.LineNumber }
+350
+381
++Thought · 1.8s
+→Explored — 1 read
++Thought · 30.6s
+§7 already covers real-device checks, but this specific work deserves its own line:
+← Editdocs\SESSION_STATUS.md
+- Preset model IDs in the settings datalist may be stale — *Test connection*- Preset model IDs in the settings datalist may be stale — *Test connection*
+  is the workaround.  is the workaround.
+- `save()` aside, no real-device check of the new Money in view has happened;- `save()` aside, no real-device check of the new Money in view has happened;
+  only the headless DOM-stub smoke has.  only the headless DOM-stub smoke has.
+- **The mobile UI pass (§3) has never been seen on a handset** — it was derived
+  by parsing `styles.css`, not by rendering it. Before trusting it, look at
+  *More → Your data*, the **Money in** dialog (both used to render flush to the
+  screen edge), the **More sheet** and the **calculator** held sideways (both
+  used to clip), and tap a few controls for size.
+
+---
+
+## 8. Next phase (not started)
+
+---
+
+## 8. Next phase (not started)
++Thought · 2.1s
+Final verification run across all suites plus the stylesheet parse check:
+$ node "C:\Users\USER\AppData\Local\Temp\opencode\csscheck.js" "C:\Users\USER\Documents\PWBudget\public\app\styles.css"; node audit_calculations.js 2>&1 | Select-Object -Last 2; node smoke_test.js 2>&1 | Select-Object -Last 2; python tools/check_static.py > $null; "STATIC_EXIT=$LASTEXITCODE"; python tools/cleanu…
+(10 earlier lines)
+products : 0
+purchases: 0 | credits: 0
+---
+ M docs/SESSION_STATUS.md
+ M public/app/styles.css
+ M public/app/sw.js
++Thought · 15.9s
+Done — all suites green (160 / 165 / exit 0), stylesheet parses clean, store left empty.
+What was actually broken on a phone (found by parsing styles.css — no browser is attached to this session, so nothing below was seen, only reasoned from the source):
+Defect	Fix
+dialog { padding: 0 } sat on the forms, so Money in, AI settings and Your data rendered flush to the screen edge with nothing under the home bar	the sheet now owns the padding; forms are padding: 0, so any dialog without a form wrapper is padded like one with
+The More sheet is ~430px tall with no max-height — held sideways its first entries sat off the top, unreachable	max-height: calc(100dvh - 10px) + scroll
+The calculator keypad is overflow: hidden in a 76vh shell — landscape clipped the bottom keys	keys became the only flexible child (scroll), head/screen/foot pinned
+.branch-pick select and both statement textareas were 13px → Safari on iOS zooms the viewport into them on focus	16px everywhere; 13px returns only at ≥900px and (pointer: fine)
+Also: vh → dvh on both sheets (plain vh is the tall viewport); safe-area left/right tokens on the header, tab bar, main, sheets, toast, banners and both FABs (no-ops in portrait); .top-actions made shrinkable (at 320px with the Offline badge up the header pushed the page sideways); .storage-banner given its own desktop slot — it had inherited a tab-bar offset and would have spanned the whole window.
+And 44px is now the floor on touch via @media (max-width: 899px), (pointer: coarse) — covering the dialog ✕ buttons, row Pay/Move/Delete, review chips, AI strip, statement rows, theme switch, identity pill, and a min-height under every field and picker. The app already used 44–58px everywhere else; these were the outliers. The pointer decides rather than the width, because a tablet or a phone sideways lands in the ≥900px desktop layout while still being poked with a finger — that same rule is why the desktop type size can't be keyed on width alone.
+Changes: styles.css (+30 rules), sw.js (CACHE → pwbudget-v24, required for asset edits), docs/SESSION_STATUS.md (new §3 entry, §5 gotcha, §7 gap, and a stale "not yet committed" marker on Phase 0 corrected).
+Two caveats I want to be explicit about: the tests can't see any of this — they stay at 160/165 because none of it is observable to them; and the one thing still needing proof is a real handset, now recorded in §7. Your test server is still up if you want to look: http://127.0.0.1:8123/app/ → More → Your data, Money in, and the calculator.
+# Questions
+Commit these mobile UI fixes?
+Commit now (Recommended)
++Thought · 3.4s
+$ git log -1 --format=%B fb8c641; "=== caf607e ==="; git log -1 --format=%B caf607e
+(31 earlier lines)
+Rebuild AI_PROVIDERS against live provider data: drop groq/compound (gone from Groq's API), qwen/qwen3.6-27b (not on the free plan) and openai/gpt-oss-20b:free (no longer free); offer the free ids that exist today, with a note under the picker saying what each provider can do.
+
+Gemini leads and is the new default (id stays 'gemini' so stored configs and the smoke assertion still match) because its free tier is the only cardless one that also reads photos.
+
+aiOwnModel(): a model id belonging to another provider is discarded instead of sent to the wrong endpoint, and Save persists the effective model rather than the raw field. Unknown ids on custom endpoints are untouched.
+
+CACHE -> pwbudget-v22. 2 new smoke checks x 2 modes: 152 passed, 0 failed; audit 160 passed (parity untouched - no server change).
++Thought · 16.5s
+Approved — committing now:
+# Wrote~/AppData/Local/Temp/opencode/commitmsg.txt
+Mobile UI: sheets own their padding, 44px touch targets, safe-area insets
+
+No browser is attached to this session, so this came out of reading the
+stylesheet rather than looking at it - four defects a phone would have shown:
+
+- dialog { padding: 0} sat on the *forms*, so Money in, AI settings and Your
+  data rendered flush to the screen edge with nothing under the home bar. The
+  sheet owns the padding now and the forms are padding: 0, so a dialog without
+  a form wrapper is indented like one with.
+- The More sheet is ~430px tall and had no max-height: held sideways its first
+  entries sat off the top with no way to reach them. It scrolls now, with
+  overscroll-behavior: contain.
+- The calculator keypad is overflow: hidden inside a 76vh shell, so a phone
+  sideways lost its bottom keys. The keys are the only flexible child now
+  (flex: 1 1 auto; min-height: 0; overflow-y: auto); head, screen and foot are
+  pinned.
+- .branch-pick select and both statement textareas were 13px, which makes
+  Safari on iOS jump the viewport into them on focus. 16px everywhere; the
+  compact 13px returns only at (min-width: 900px) and (pointer: fine).
+
+Also: 92vh/76vh -> dvh (plain vh is the tall viewport, so a sheet can overrun
+the screen while Safari's bar is showing); --safe-l/--safe-r folded into
+--gutter-l/--gutter-r on the header, tab bar, main, both sheets, the toast, the
+banners and the two FABs, so a notched phone sideways does not hide them behind
+the camera (no-ops in portrait); .top-actions made shrinkable (at 320px with
+the Offline badge up the header pushed the page sideways); .storage-banner
+given its own desktop slot, having inherited a tab-bar offset for a layout
+with no tab bar.
+
+44px is the floor on touch, via @media (max-width: 899px), (pointer: coarse):
+the dialog close buttons, row Pay/Move/Delete, the seg control, review chips,
+the AI strip, the calculator head, statement rows, the theme switch and the
+identity pill, plus a min-height under every field and picker. The app already
+sat at 44-58px everywhere else, so these were the outliers. The pointer decides
+rather than the width, because a tablet or a phone held sideways lands in the
+>=900px desktop layout while still being poked with a finger.
+
+Tests: 160 audit and 165 smoke unchanged - none of this is observable to them.
+The check that did run is a stylesheet parse (630 blocks, every declaration and
+comment balanced). CACHE -> pwbudget-v24. Docs: SESSION_STATUS gains this pass
+in section 3, the no-browser gotcha in 5, and the unverified-on-handset gap in
+7.
+
++Thought · 1.7s
+← Edit~/AppData/Local/Temp/opencode/commitmsg.txt
+
+No browser is attached to this session, so this came out of reading theNo browser is attached to this session, so this came out of reading the
+stylesheet rather than looking at it - four defects a phone would have shown:stylesheet rather than looking at it - four defects a phone would have shown:
+
+- dialog { padding: 0} sat on the *forms*, so Money in, AI settings and Your- dialog { padding: 0 } sat on the *forms*, so Money in, AI settings and Your
+  data rendered flush to the screen edge with nothing under the home bar. The  data rendered flush to the screen edge with nothing under the home bar. The
+  sheet owns the padding now and the forms are padding: 0, so a dialog without  sheet owns the padding now and the forms are padding: 0, so a dialog without
+  a form wrapper is indented like one with.  a form wrapper is indented like one with.
+- The More sheet is ~430px tall and had no max-height: held sideways its first- The More sheet is ~430px tall and had no max-height: held sideways its first
++Thought · 1.5s
+$ git add public/app/styles.css public/app/sw.js docs/SESSION_STATUS.md; git commit -F "C:\Users\USER\AppData\Local\Temp\opencode\commitmsg.txt"; "---"; git status --short; git log --oneline -3
+(3 earlier lines)
+[main 4efa62e] Mobile UI: sheets own their padding, 44px touch targets, safe-area insets
+ 3 files changed, 153 insertions(+), 29 deletions(-)
+---
+4efa62e Mobile UI: sheets own their padding, 44px touch targets, safe-area insets
+fb8c641 Phase 0: your data - backup/restore/CSV export and loud storage failures
+caf607e AI connection: Google first, verified free models, no cross-provider model ids
+Error: Rate limit exceeded. Please try again later.
+Build · MiMo-V2.6-Flash Free · 596ms
+continue where we left off
+Error: Rate limit exceeded. Please try again later.
+Build · MiMo-V2.6-Flash Free · 1.9s
+Switched model to Big Pickle
+continue where we left off
+✗Compaction
+Rate limit exceeded. Please try again later.
+Switched model to Muse Spark 1.3 Free (xhigh)
+continue where we left off
+Error: Rate limit exceeded. Please try again later.
+Build · Muse Spark 1.3 Free · 818ms
+◈Instructions updated: core/codemode, core/environment
+! Shell cancelled · python server.py 8123
+continue
+…/agents      Switch agent
+…/btw        Error: Rate limit exceeded. Please try again later. One-shot answer from the session's context without adding to the conversation
+…/cd          Change working directory
+…/clear      Build · Muse Spark 1.3 Free · 1.7s Clear session
+…/compact     Compact session
+Build·Muse Spark 1.3 FreeOpenCode Zen·xhigh
+~/Documents/PWBudget:main

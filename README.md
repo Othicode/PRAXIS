@@ -56,6 +56,20 @@ contract, so nothing in the UI changes.
   of the app the model may reach. Turn *Receipt & slip capture* off and the
   scan bar disappears; turn *My items & suppliers* off and your catalogue
   stops travelling with a scan.
+- **💬 The assistant** — a chat bubble on every screen (top bar 🤖) that
+  opens as a **glass drawer**: a dimmed backdrop, then a full sheet on the
+  phone or a floating card on the right of a wide screen. It
+  answers from *your* books: what you spent this month, what you owe, price
+  moves, top suppliers, reminders, a PDF report on request, even "open the
+  Credits screen". It opens with a **briefing** — where the shop stands right
+  now, keyless — and after each answer offers one-tap **follow-up** chips. It
+  is honest about its hands: a tool your coverage has switched off is shown as
+  `[locked]` in its instructions, so it will offer *propose widening access*
+  instead of pretending. Writes — recording a pasted slip, taking a backup,
+  flipping a coverage switch, building a file — always arrive as a card with
+  an **Approve** tap (or **Approve all** for a batch); nothing is written by
+  itself, and a model that cannot be reached says so with **Try again**
+  instead of going quiet.
 - **Credits** — outstanding accounts with balance + %-settled progress and
   payment history; "Pay now" records later payments and recomputes everything.
   Each open credit shows how **old** it is (⏳ 60+ days = overdue) and an
@@ -240,7 +254,8 @@ key the slip reader gets a real model instead of regex rules.
 
 1. Tap the **AI strip** (or *AI settings* in the phone's **More** sheet).
 2. Pick a provider — **Google Gemini**, **Groq** or **OpenRouter** are all
-   free tiers with no credit card; *Custom* takes any OpenAI-compatible
+   free tiers with no credit card, **DeepSeek** is the cheapest pay-per-use
+   one that reads photos, and *Custom* takes any OpenAI-compatible
    `base URL`. A one-line note under the picker says what that provider can
    do (Gemini is the free one that also **reads photos**; Groq's free plan is
    text-only). **Get a free key ↗** opens the right console.
@@ -257,10 +272,14 @@ server, never to a third party. *Forget* wipes it and the strip goes hollow.
 Coverage is yours to set: *Receipt & slip capture*, *My items & suppliers*,
 *Credit you owe* and *App settings* are all live switches, not decoration —
 each one decides whether the corresponding part of the app is part of the
-model's body.
+model's body. The **assistant** plays by the same switches: it is told which
+hands are locked and must not claim them, and can *ask* you to widen access
+(`propose_coverage`) — you still tap Approve.
 
 An unreachable model never fails a core path: `db.js` falls back to the same
 deterministic rules a keyless server runs, and the strip turns red to say so.
+In the assistant a failed turn retries once, then offers **Try again** rather
+than leaving a dead thread.
 
 ## Your data — backup, restore, export
 
@@ -304,7 +323,14 @@ and the AI surface: the status strip, the coverage defaults, the settings
 dialog's provider list (and a provider switch swapping in that provider's own
 model id, never another's), a pasted key installing a device-side connection,
 an unreachable model falling back instead of failing, and *Forget* detaching
-it again — plus **Your data**: the backup file's table coverage, each CSV's
+it again — plus the **assistant**: locked tools described (never hidden),
+`propose_coverage` offering to widen access, the keyless briefing, follow-up
+chips, a failed turn offering *Try again*, one pasted slip expanding into one
+pending card per line, a requested backup arriving as a file, **Approve all**
+recording several rows in one tap, the history cap keeping a waiting card,
+the new read tools answering, `navigate` opening a view, a month-scoped
+report, and the harness's own exports — then **Your data**: the backup file's
+table coverage, each CSV's
 header and first row, a restore putting a deleted purchase back and nothing
 else, and (offline only) a full store answering `507` with the purchase rolled
 out of the store and the storage banner raising then clearing itself.
@@ -337,9 +363,10 @@ Answers *"is the arithmetic actually right?"* in five sections:
 4. **Recorded-fixture replay** — a second server started against `fixtures/ai`
    must answer a recorded request with `source: "fixture"`, an unrecorded one
    with `source: "heuristic"`, and a bare image with a 400.
-5. **Shared model contract** — the nine constants both engines ask the model
+5. **Shared model contract** — the twelve constants both engines ask the model
    with (`AI_SYSTEM`, the capture image + text prompts, the instruct prompt,
-   the two statement prompts and the three AI error strings)
+   the two statement prompts, the assistant's prompt + its two fallback lines,
+   and the three AI error strings)
    must be byte-identical in `server.py` and `public/app/db.js`; otherwise the
    same slip would yield different drafts online and offline.
 

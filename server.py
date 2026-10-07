@@ -1089,11 +1089,13 @@ FIELD_ALIASES = {
     "distributor": "distributor", "supplier": "distributor", "vendor": "distributor",
     "date": "date",
     "payment": "payment_method", "payment method": "payment_method", "method": "payment_method",
+    "payment_method": "payment_method",
     "memo": "memo", "note": "memo",
     "product": "product", "item": "product",
     "unit": "unit",
     "quantity": "quantity", "qty": "quantity",
     "amount": "total_amount", "total": "total_amount",
+    "total_amount": "total_amount",
 }
 NUMERIC_FIELDS = {"quantity", "total_amount"}
 TEXT_LIMITS = {"distributor": 80, "product": 80, "unit": 20, "memo": 140}
@@ -1121,6 +1123,9 @@ AI_PROMPT_TEXT_PREFIX = "Turn this note into a purchase draft JSON: {\"date\":\"
 AI_PROMPT_INSTRUCT = "Apply this edit to the bookkeeping draft and return only {\"op\":\"update\",\"changes\":{...}} with an empty changes object if the instruction does not name a field. Whitelisted fields: "
 AI_PROMPT_STATEMENT_IMAGE = "Read this statement image and return JSON {\"candidates\":[{\"date\":\"YYYY-MM-DD\",\"direction\":\"out|in\",\"amount\":0,\"description\":\"\",\"reference\":\"\"}],\"uncertain\":[{field,why,options[]}]}."
 AI_PROMPT_STATEMENT_TEXT_PREFIX = "Read this statement text and return JSON {\"candidates\":[{\"date\":\"YYYY-MM-DD\",\"direction\":\"out|in\",\"amount\":0,\"description\":\"\",\"reference\":\"\"}],\"uncertain\":[{field,why,options[]}]}.\n"
+AI_PROMPT_AGENT = "You are the control centre of PW Budget, a bookkeeping app for a small shop. The owner types instructions here; the app is your body and the tools below are your hands. Answer with one JSON object only \u2014 no prose, no markdown: {\"reply\":\"what you say to the owner\",\"actions\":[{\"tool\":\"tool_id\",\"args\":{}}]}. Rules: use only the tools listed below and only the arguments they declare; propose at most what the instruction needs; never claim a change already happened, because every write is a proposal the owner approves by hand \u2014 write \"I will\", not \"I did\"; when you need data first, ask for the read tools and wait for the result; when the owner refuses, adjust instead of repeating yourself; when nothing fits, say so plainly and name the closest tool. Tools marked [locked] are held by a coverage switch the owner has left off: never claim you can run one, and offer propose_coverage only when widening access would actually help."
+AI_AGENT_OFFLINE = "I can think, but there is no model attached to this device. Add a free key under Settings \u2192 AI connection and I will take over from there."
+AI_AGENT_DOWN = "I could not reach the model just now \u2014 check the connection and try again."
 
 
 def _r2(x):
@@ -1330,16 +1335,18 @@ def _fixture_write(kind, payload, response):
         pass
 
 
-def _ai_chat(prompt, image=None):
+def _ai_chat(prompt, image=None, system=None):
     """OpenAI-compatible chat completion. Returns the model's text, or None on
-    any failure — an unreachable model must never break a core path."""
+    any failure — an unreachable model must never break a core path.
+    `system` overrides the extraction contract for routes that are not about
+    receipts (the agent chat); callers passing nothing keep AI_SYSTEM."""
     content = [{"type": "text", "text": prompt}]
     if image:
         url = image if str(image).startswith("data:") else f"data:image/jpeg;base64,{image}"
         content.append({"type": "image_url", "image_url": {"url": url}})
     body = json.dumps({
         "model": AI_MODEL, "temperature": 0,
-        "messages": [{"role": "system", "content": AI_SYSTEM},
+        "messages": [{"role": "system", "content": system or AI_SYSTEM},
                      {"role": "user", "content": content}],
     }).encode("utf-8")
     req = urllib.request.Request(
@@ -1660,6 +1667,45 @@ def ai_statement(payload):
                  "source": "heuristic"}
 
 
+def ai_agent(payload):
+    """The agent's one call — mirror of db.js aiAgent().
+
+    The model never touches a record here: it gets a description of the tools
+    it may propose, whatever the owner's coverage lets it know, and the
+    conversation so far, and it answers with what to say plus the actions it
+    would like to run. Carrying those out — and asking permission first — is
+    the app's job, not the model's."""
+    msgs = payload.get("messages")
+    if not isinstance(msgs, list):
+        msgs = None
+    text = str(payload.get("text") or "")
+    if msgs is None and not text.strip():
+        return 400, {"error": AI_NOTHING_ERROR}
+    if not AI_API_KEY:
+        return 200, {"text": AI_AGENT_OFFLINE, "source": "heuristic"}
+
+    def _role(m):
+        return str(m.get("role") or "user") if isinstance(m, dict) else "user"
+
+    def _content(m):
+        return str(m.get("content") or "") if isinstance(m, dict) else ""
+
+    tools = [str(t) for t in (payload.get("tools") or [])
+             if isinstance(t, (str, int, float)) and not isinstance(t, bool)]
+    ctx = str(payload.get("context") or "")
+    source = msgs if msgs is not None else [{"role": "user", "content": text}]
+    lines = [f"{_role(m)}: {_content(m)[:2000]}" for m in source[-12:]]
+    parts = ["Tools you may use:\n" + "\n".join(tools)]
+    if ctx.strip():
+        parts.append("What you already know:\n" + ctx[:4000])
+    parts.append("Conversation:\n" + "\n".join(lines))
+    parts.append("Reply with the JSON object now.")
+    out = _ai_chat("\n\n".join(parts), None, AI_PROMPT_AGENT)
+    if out is None:
+        return 200, {"text": AI_AGENT_DOWN, "source": ""}
+    return 200, {"text": out, "source": "model"}
+
+
 # ---------------------------------------------------------------------------
 # HTTP layer
 # ---------------------------------------------------------------------------
@@ -1903,6 +1949,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(body, status)
             if path == "/api/ai/statement" and method == "POST":
                 status, body = ai_statement(payload or {})
+                return self.send_json(body, status)
+            if path == "/api/ai/chat" and method == "POST":
+                status, body = ai_agent(payload or {})
                 return self.send_json(body, status)
 
             return self.send_json({"error": "not found"}, 404)

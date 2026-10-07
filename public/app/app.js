@@ -1450,15 +1450,21 @@ async function submitPay(e) {
    party. Without one, both engines fall back to the same built-in rules. */
 const AI_KEY_STORAGE = "pwbudget.ai.v1";
 
-/* Each preset is a real, currently-free endpoint: `models` is the datalist
-   offered under it, `note` is what the dialog tells the owner about it.
-   `google` leads because its free tier is the only one that both takes a key
-   with no card and reads photographs — which is what a slip scan needs. */
+/* Each preset is a real, live endpoint — verified against the provider, not
+   guessed: preflights answered from this app's own origin, ids read off the
+   provider's own docs or model list. `models` is the datalist offered under
+   it, `note` is what the dialog tells the owner about it. `google` leads
+   because its free tier is the only one that both takes a key with no card
+   and reads photographs — which is what a slip scan needs. */
 const AI_PROVIDERS = [
   { id: "gemini", name: "Google Gemini", label: "Google Gemini · free, no card",
     base: "https://generativelanguage.googleapis.com/v1beta/openai",
     get: "https://aistudio.google.com/apikey",
-    models: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"],
+    /* Google retires ids as it ships replacements, so these are the ones a
+       brand-new key is actually served today. An older id a returning owner
+       has stored stays valid for them: it is on no preset's list, so
+       aiOwnModel() leaves it alone instead of swapping it out. */
+    models: ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash"],
     note: "Free with no card, and it reads photos — the simplest pick." },
   { id: "groq", name: "Groq", label: "Groq · free, no card",
     base: "https://api.groq.com/openai/v1",
@@ -1469,8 +1475,15 @@ const AI_PROVIDERS = [
     base: "https://openrouter.ai/api/v1",
     get: "https://openrouter.ai/keys",
     models: ["openrouter/free", "google/gemma-4-31b-it:free",
-             "qwen/qwen3.8-27b:free", "thinkingmachines/inkling:free"],
-    note: "Free models, no card — several of them read photos." },
+             "qwen/qwen3.8-27b:free", "thinkingmachines/inkling:free",
+             "anthropic/claude-haiku-4.5"],
+    note: "Free models, no card — several read photos, and paid ids like Claude work once OpenRouter has credit." },
+  { id: "deepseek", name: "DeepSeek", label: "DeepSeek · cheap, reads photos",
+    base: "https://api.deepseek.com/v1",
+    get: "https://platform.deepseek.com/api_keys",
+    models: ["deepseek-v4-flash", "deepseek-v4-flash-vision-exp",
+             "deepseek-v4-pro"],
+    note: "Cheapest that reads photos (about $0.15 per 1M words in) — top up a balance, no free tier." },
   { id: "custom", name: "Custom", label: "Custom · OpenAI-compatible",
     base: "", get: "", models: [],
     note: "Any OpenAI-compatible endpoint you already have." },
@@ -1799,6 +1812,1782 @@ async function aiRequest(path, payload) {
   if (aiConfigured() && typeof PWDB !== "undefined")
     return await offlineRequest("POST", path, {}, payload);
   return await api(path, opts);
+}
+
+/* ---------- AI assistant: the control centre ----------
+   Everything above is a body part. This is the console: the owner types,
+   speaks or attaches something, the model proposes what to do, and nothing
+   that changes a record happens until a hand presses Approve.
+
+   Three rules hold it up:
+     1. The model only ever *proposes*. Reads run at once; writes render an
+        approval card and wait for a human.
+     2. Every write lands in an on-device journal with the state before it,
+        so the owner — or the model, when asked — can put it back.
+     3. The tool list is filtered by the same coverage areas as everything
+        else: turn `app` off and the hands are gone.
+
+   /api/ai/chat is mirrored in db.js and server.py. The tools themselves
+   call ordinary /api/* routes, so the body gains nothing to mirror. */
+const AGENT_STORE = "pwbudget.agent.v1";
+const AGENT_TURNS = 3;      // model turns allowed per user message
+const AGENT_GAP = 1200;     // ms between model calls — free tiers are metered
+const AGENT_JOURNAL_MAX = 120;
+
+let AGENT = { messages: [], journal: [], voice: false, seq: 1, jseq: 1 };
+let AGENT_BUSY = false;
+let AGENT_LAST_CALL = 0;
+const AGENT_FILES = {};     // generated reports: fid -> {name, mime, bytes}
+
+/* Every hand the model may ask for. `area` ties it to the coverage switch,
+   `risk` decides whether it runs straight away or waits for approval, and
+   `free` marks a hand the coverage matrix never hides — asking the owner to
+   widen that matrix is itself part of the deal. */
+const AGENT_TOOLS = [
+  { id: "overview", risk: "read", area: "", label: "Read the dashboard",
+    args: "{}", desc: "This month's spend, money in, outstanding credit and budget left." },
+  { id: "search_purchases", risk: "read", area: "", label: "Search purchases",
+    args: "{q?, month?, branch_id?, limit?}", desc: "Find purchases by word, month or branch." },
+  { id: "get_purchase", risk: "read", area: "", label: "Read one purchase",
+    args: "{purchase_id}", desc: "The full detail of a single purchase row." },
+  { id: "compare_months", risk: "read", area: "", label: "Compare months",
+    args: "{n?}", desc: "Spend, money in and bill count for the last n months (default 3), with the change between them." },
+  { id: "get_reminders", risk: "read", area: "", label: "Read the reminders",
+    args: "{}", desc: "Overdue credit, budget burn and unit-price spikes — worst first. Says 'all quiet' when there is nothing." },
+  { id: "price_trend", risk: "read", area: "", label: "Unit price trend for an item",
+    args: "{product, n?}", desc: "Average unit price per month for one of your items — shows a price rising." },
+  { id: "top_suppliers", risk: "read", area: "", label: "Top suppliers",
+    args: "{n?}", desc: "Who has been paid the most, with share of spend." },
+  { id: "navigate", risk: "read", area: "", label: "Open a screen",
+    args: "{view}",
+    desc: "view: dashboard|purchases|income|credits|analytics|budget|branches — shows it behind this panel." },
+  { id: "list_income", risk: "read", area: "money", label: "List money in",
+    args: "{month?, limit?}", desc: "List recorded income rows." },
+  { id: "search_income", risk: "read", area: "money", label: "Search money in",
+    args: "{q?, month?, limit?}", desc: "Find money-in rows by word or month." },
+  { id: "list_credits", risk: "read", area: "money", label: "List what is owed",
+    args: "{}", desc: "Outstanding supplier credit with balances." },
+  { id: "get_budget", risk: "read", area: "money", label: "Read the budget",
+    args: "{year?, month?, branch_id?}", desc: "Saved budget, allocations and actual spend." },
+  { id: "budget_health", risk: "read", area: "money", label: "Budget health",
+    args: "{year?, month?}", desc: "Plan versus actual: percent used, what is left, and each allocation's burn." },
+  { id: "get_analytics", risk: "read", area: "money", label: "Read analytics",
+    args: "{n?}", desc: "Monthly spend, top items, distributors and payment split." },
+  { id: "list_catalogue", risk: "read", area: "catalogue", label: "List items and suppliers",
+    args: "{}", desc: "Your own product and distributor names, spelled your way." },
+  { id: "list_changes", risk: "read", area: "", label: "Read the change log",
+    args: "{}", desc: "What has been changed here, with the state before each change." },
+  { id: "make_report", risk: "read", area: "", label: "Build a report file",
+    args: "{kind, format, month?, year?, branch_id?}",
+    desc: "kind: overview|purchases|income|credits|budget; format: pdf|docx. Returns a file to download." },
+  { id: "backup_books", risk: "read", area: "", label: "Back up my books",
+    args: "{}", desc: "Build the full backup JSON — every branch, supplier, item, purchase, payment, money-in row and budget — for the owner to keep." },
+  { id: "import_slip", risk: "write", area: "capture", label: "Record a pasted slip",
+    args: "{text?}",
+    desc: "Turn pasted receipt or statement lines into one approval card per purchase. Text may be omitted when the owner's message already holds it." },
+  { id: "propose_coverage", risk: "write", area: "", free: true,
+    label: "Change a coverage switch",
+    args: "{area, on?}",
+    desc: "area: capture|catalogue|money|app; on: true (default) or false. Proposes one of the owner's four coverage switches — it turns on only when they approve." },
+  { id: "create_purchase", risk: "write", area: "app", label: "Record a purchase",
+    args: "{date, distributor, product, unit, quantity, total_amount, payment_method, branch_id?, memo?, credit_paid?}",
+    desc: "Write a new purchase row." },
+  { id: "create_income", risk: "write", area: "app", label: "Record money in",
+    args: "{date, amount, source, reference?, memo?, branch_id?}", desc: "Write a new income row." },
+  { id: "pay_credit", risk: "write", area: "app", label: "Pay a credit",
+    args: "{purchase_id, date, amount, memo?}", desc: "Record a payment against an outstanding credit." },
+  { id: "save_budget", risk: "write", area: "app", label: "Save the budget",
+    args: "{year, month, total_amount, save_amount, branch_id?}", desc: "Set the monthly plan." },
+  { id: "add_branch", risk: "write", area: "app", label: "Add a branch",
+    args: "{name}", desc: "Create a new shop or plant." },
+  { id: "move_purchase", risk: "write", area: "app", label: "Move a purchase to another branch",
+    args: "{purchase_id, branch_id}", desc: "Change which branch a purchase belongs to." },
+  { id: "delete_purchase", risk: "danger", area: "app", label: "Delete a purchase",
+    args: "{purchase_id}", desc: "Remove a purchase row and its credit payments." },
+  { id: "delete_income", risk: "danger", area: "app", label: "Delete a money-in row",
+    args: "{income_id}", desc: "Remove an income row." },
+  { id: "undo_change", risk: "danger", area: "app", label: "Undo an earlier change",
+    args: "{jid}", desc: "Put back the previous state of a logged change." },
+];
+const AGENT_TOOL = (id) => AGENT_TOOLS.find((t) => t.id === id) || null;
+/* The screens the assistant may open behind its panel — same list the app's
+   own navigation accepts. */
+const AGENT_VIEWS = ["dashboard", "purchases", "income", "credits", "analytics", "budget", "branches"];
+
+/* Which hands are attached right now, by the same coverage switch the rest
+   of the app obeys. Reads need no permission beyond the area that owns the
+   data; every write needs `app` on top of that. `free` hands (asking for
+   coverage itself) are attached whatever the matrix says. */
+function agentTools() {
+  return AGENT_TOOLS.filter((t) => {
+    if (t.free) return true;
+    if (t.area && !aiAllows(t.area)) return false;
+    if (t.risk !== "read" && !aiAllows("app")) return false;
+    return true;
+  });
+}
+/* The hands the matrix is holding back. They are still *described* to the
+   model — a tool it never hears about is a capability it will deny having,
+   and "that's all I can do" is a lie it cannot know it is telling. */
+function agentLocked() {
+  const on = agentTools();
+  return AGENT_TOOLS.filter((t) => on.indexOf(t) === -1);
+}
+function agentLockReason(t) {
+  const area = AI_AREAS.find((a) => a.id === (t.area || "app"));
+  return `LOCKED — the owner has not switched on "${area ? area.label : "App settings"}" in AI connection`;
+}
+const agentToolLines = () => agentTools()
+  .map((t) => `${t.id} [${t.risk}] (${t.args}) - ${t.desc}`)
+  .concat(agentLocked().map((t) =>
+    `${t.id} [locked] (${t.args}) - ${t.desc} ${agentLockReason(t)}; you may propose it with propose_coverage, but never claim you can run it.`));
+
+function loadAgent() {
+  try {
+    const raw = localStorage.getItem(AGENT_STORE);
+    const o = raw ? JSON.parse(raw) : null;
+    if (o && typeof o === "object") {
+      AGENT = {
+        messages: Array.isArray(o.messages) ? o.messages : [],
+        journal: Array.isArray(o.journal) ? o.journal : [],
+        voice: !!o.voice,
+        seq: Number(o.seq) || 1,
+        jseq: Number(o.jseq) || 1,
+      };
+      // A generated file lives only in memory; on reload its card is a promise
+      // that has to be made again rather than a lie.
+      AGENT.messages.forEach((m) => (m.cards || []).forEach((c) => {
+        if (c.type === "file") c.stale = !AGENT_FILES[c.fid];
+      }));
+    }
+  } catch (e) { /* private mode: start empty */ }
+}
+
+function saveAgent() {
+  capAgentHistory();
+  try {
+    localStorage.setItem(AGENT_STORE, JSON.stringify({
+      messages: AGENT.messages, journal: AGENT.journal, voice: AGENT.voice,
+      seq: AGENT.seq, jseq: AGENT.jseq,
+    }));
+  } catch (e) { /* quota */ }
+}
+
+/* The conversation lives on this device and grows faster than anything else
+   the app stores — read-results are the bulk of it. Shed the old ones before
+   a long chat quietly exceeds localStorage and takes the change log down with
+   it. A card still waiting for the owner is never shed. */
+function capAgentHistory() {
+  let hidden = 0;
+  for (let i = AGENT.messages.length - 1; i >= 0; i--) {
+    const m = AGENT.messages[i];
+    if (m && m.role === "system" && m.hidden && m.text) {
+      hidden++;
+      if (hidden > 6) m.text = "";
+    }
+  }
+  let over = AGENT.messages.length - 120;
+  if (over > 0) {
+    AGENT.messages = AGENT.messages.filter((m) => {
+      const pending = (m && m.cards || []).some((c) => c.type === "ask" && c.status === "pending");
+      if (pending || over <= 0) return true;
+      over--;
+      return false;
+    });
+  }
+}
+
+/* ---------- rendering ---------- */
+const AGENT_RISK = {
+  read: { cls: "", tag: "reads" },
+  write: { cls: "write", tag: "changes data" },
+  danger: { cls: "danger", tag: "destructive" },
+};
+const AGENT_ICON = { read: "👁", write: "✍", danger: "⚠" };
+
+function agentAskHtml(c, fresh) {
+  const r = AGENT_RISK[c.risk] || AGENT_RISK.read;
+  const lines = (c.lines || []).map((l) => `<li>${esc(l)}</li>`).join("");
+  const state = {
+    pending: "",
+    done: `<div class="acard-state ok">✓ done — written to your books</div>`,
+    denied: `<div class="acard-state no">✗ denied — nothing was changed</div>`,
+    failed: `<div class="acard-state no">✗ ${esc(c.error || "could not be done")}</div>`,
+    undone: `<div class="acard-state ok">✓ undone — previous state restored</div>`,
+  }[c.status] || "";
+  const acts = c.status === "pending"
+    ? `<div class="acard-acts">
+         <button type="button" class="btn primary small" data-agent-act="approve" data-aid="${c.aid}">Approve</button>
+         <button type="button" class="btn ghost small" data-agent-act="deny" data-aid="${c.aid}">Deny</button>
+       </div>`
+    : "";
+  return `<div class="acard ${r.cls} st-${esc(c.status || "pending")}${fresh ? " fresh" : ""}" data-aid="${c.aid}">
+    <div class="acard-top"><span class="acard-ico">${AGENT_ICON[c.risk] || "•"}</span>
+      <b>${esc(c.label || c.tool)}</b><span class="abadge ${r.cls}">${esc(r.tag)}</span></div>
+    <ul class="acard-lines">${lines}</ul>${state}${acts}</div>`;
+}
+
+function agentResultHtml(c, fresh) {
+  const body = c.text ? `<div class="acard-body">${esc(c.text)}</div>` : "";
+  return `<div class="acard read st-done${fresh ? " fresh" : ""}">
+    <div class="acard-top"><span class="acard-ico">👁</span><b>${esc(c.label || c.tool)}</b>
+      <span class="abadge">read</span></div>${body}</div>`;
+}
+
+function agentFileHtml(c, fresh) {
+  const ready = !c.stale && AGENT_FILES[c.fid];
+  return `<div class="acard read st-done${fresh ? " fresh" : ""}">
+    <div class="acard-top"><span class="acard-ico">📄</span><b>${esc(c.name)}</b>
+      <span class="abadge">${esc(c.format)}</span></div>
+    <div class="acard-acts">
+      <button type="button" class="btn ${ready ? "primary" : "ghost"} small"
+        data-agent-act="download" data-fid="${esc(c.fid)}"${ready ? "" : " disabled"}>
+        ${ready ? "⤓ Download" : "ask me to rebuild it"}</button>
+    </div></div>`;
+}
+
+function agentCardHtml(c, fresh) {
+  if (!c) return "";
+  if (c.type === "ask") return agentAskHtml(c, fresh);
+  if (c.type === "result") return agentResultHtml(c, fresh);
+  if (c.type === "file") return agentFileHtml(c, fresh);
+  return "";
+}
+
+/* The quick-start chips reflect the hands actually attached: offering "what
+   do we owe" when that switch is off would only earn a locked answer. */
+function agentChips() {
+  const ids = agentTools().map((t) => t.id);
+  const chips = [{ text: "How much did we spend this month?" }];
+  if (ids.indexOf("list_credits") !== -1) chips.push({ text: "What do we owe right now?" });
+  else chips.push({ act: "open-ai", text: "Turn on credit coverage ⚙️" });
+  chips.push({ text: "Build me a PDF report" });
+  chips.push({ text: "What have you changed so far?" });
+  return chips;
+}
+
+function agentBriefHtml() {
+  const b = AGENT_BRIEF;
+  if (!b) return "";
+  const alerts = b.alerts && b.alerts.length
+    ? `<ul class="agent-brief-list">${b.alerts.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>`
+    : `<p class="agent-brief-quiet">✅ Nothing needs attention right now.</p>`;
+  return `<div class="agent-brief"><b>${esc(b.hello)} — here is where the shop stands.</b>
+    ${alerts}<small>${esc(b.reach)}</small></div>`;
+}
+
+/* A rendered message is only animated the first time it appears — the list
+   is rebuilt wholesale on every state change, so "new since last paint" has
+   to be remembered, not derived. Object identity does that (history cap
+   keeps the same references). */
+const AGENT_SEEN = new WeakSet();
+const AGENT_SEEN_CARDS = new WeakSet();
+
+function renderAgent() {
+  const box = $("#agent-msgs");
+  if (!box) return;
+  const msgs = AGENT.messages;
+  if (!msgs.length) {
+    box.innerHTML = `<div class="agent-empty">
+      <div class="agent-empty-ico">✦</div>
+      <b>What should I do?</b>
+      <p>Ask in plain words. Reads happen straight away; anything that changes a
+         record waits for your approval first.</p>
+      ${agentBriefHtml()}
+      <div class="agent-chips">
+        ${agentChips().map((c) => c.act
+          ? `<button type="button" class="agent-chip" data-agent-act="${esc(c.act)}">${esc(c.text)}</button>`
+          : `<button type="button" class="agent-chip" data-agent-chip="${esc(c.text)}">${esc(c.text)}</button>`).join("")}
+      </div></div>`;
+  } else {
+    box.innerHTML = msgs.map((m) => {
+      if (m.hidden) return "";
+      if (m.role === "system")
+        return `<div class="agent-sys">${esc(m.text)}</div>`;
+      const fresh = !AGENT_SEEN.has(m);
+      AGENT_SEEN.add(m);
+      const side = m.role === "user" ? "me" : "bot";
+      const cards = (m.cards || []).map((c) => {
+        const cf = !AGENT_SEEN_CARDS.has(c);
+        AGENT_SEEN_CARDS.add(c);
+        return agentCardHtml(c, cf);
+      }).join("");
+      const pend = (m.cards || []).filter((c) => c.type === "ask" && c.status === "pending").length;
+      const bulk = pend >= 2
+        ? `<div class="acard-acts bulk">
+             <button type="button" class="btn primary small" data-agent-act="approve-all"
+               data-mid="${m.mid || 0}">Approve all ${pend}</button>
+           </div>` : "";
+      const speak = side === "bot" && m.text
+        ? `<button type="button" class="agent-say" data-agent-act="speak"
+             data-mid="${m.mid || 0}" aria-label="Read aloud">🔈</button>` : "";
+      const retry = side === "bot" && m.retry
+        ? `<button type="button" class="btn ghost small agent-retry"
+             data-agent-act="retry" data-mid="${m.mid || 0}">Try again</button>` : "";
+      const follow = side === "bot" && (m.follow || []).length
+        ? `<div class="agent-follow">${m.follow.map((f) =>
+            `<button type="button" class="agent-chip" data-agent-chip="${esc(f)}">${esc(f)}</button>`).join("")}</div>`
+        : "";
+      const av = side === "bot"
+        ? `<span class="agent-av" aria-hidden="true">✦</span>` : "";
+      return `<div class="agent-row ${side}${fresh ? " fresh" : ""}">${av}
+        <div class="agent-col">
+          <div class="agent-bubble">${m.text ? esc(m.text) : ""}${speak}</div>
+          ${retry}${cards}${bulk}${follow}
+        </div></div>`;
+    }).join("");
+    if (AGENT_BUSY)
+      box.insertAdjacentHTML("beforeend",
+        `<div class="agent-row bot">
+           <span class="agent-av" aria-hidden="true">✦</span>
+           <div class="agent-col"><div class="agent-bubble typing"><i></i><i></i><i></i></div></div>
+         </div>`);
+  }
+  renderAgentStatus();
+  const input = $("#agent-input");
+  const send = $("#agent-send");
+  if (send) send.disabled = AGENT_BUSY;
+  if (input) input.disabled = AGENT_BUSY;
+  const scroller = $("#agent-scroll") || box;
+  if (scroller && scroller.scrollTop != null) scroller.scrollTop = scroller.scrollHeight;
+}
+
+function renderAgentStatus() {
+  const el = $("#agent-status");
+  if (!el) return;
+  const s = aiStatus();
+  const reach = agentTools().map((t) => t.risk).filter((v, i, a) => a.indexOf(v) === i);
+  const pill = $("#agent-pill");
+  if (pill) pill.classList.toggle("on", aiConfigured());
+  if (!aiConfigured()) { el.textContent = "no model attached"; return; }
+  const pend = AGENT.messages.reduce((n, m) =>
+    n + (m.cards || []).filter((c) => c.type === "ask" && c.status === "pending").length, 0);
+  const bits = [`${reach.length ? "can " + reach.join("/") : "reads only"}`];
+  const locked = agentLocked().length;
+  if (locked) bits.push(`${locked} locked by coverage`);
+  if (AI_LAST_ERROR) bits.push("problem");
+  el.textContent = bits.join(" · ") + (pend ? ` · ${pend} waiting on you` : "");
+  const fab = $("#agent-fab");
+  if (fab) fab.className = "agent-fab" + (pend ? " pending" : "");
+}
+
+function agentOpen() {
+  const shell = $("#agent-shell");
+  if (!shell) return;
+  shell.classList.add("open");
+  shell.setAttribute("aria-hidden", "false");
+  document.body.classList.add("agent-open");
+  renderAgent();
+  /* First opening of an empty conversation gets the briefing; it fetches the
+     reminders and re-renders itself, so the panel answers immediately either
+     way. */
+  if (!AGENT.messages.length) agentBriefing();
+  setTimeout(() => { const i = $("#agent-input"); if (i && i.focus) i.focus(); }, 60);
+}
+
+function agentClose() {
+  const shell = $("#agent-shell");
+  if (!shell) return;
+  shell.classList.remove("open");
+  shell.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("agent-open");
+}
+
+/* ---------- what the model is told ---------- */
+async function agentContext() {
+  const bits = [`Today ${today()}.`, `Branch ${branchLabel(state.branch_id)}.`,
+                `Currency ${META ? META.currency : "GH\u20b5"}.`,
+                `Coverage ${aiScopeSummary()}.`];
+  const ctx = await aiBuildContext();
+  if (ctx) bits.push(ctx);
+  const alerts = await agentAlerts();
+  if (alerts.length)
+    bits.push("Reminders: " + alerts.slice(0, 3).map((x) => x.title).join("; ") + ".");
+  else bits.push("Reminders: nothing needs attention.");
+  const pending = AGENT.messages.reduce((n, m) =>
+    n + (m.cards || []).filter((c) => c.type === "ask" && c.status === "pending").length, 0);
+  if (pending) bits.push(`${pending} proposal(s) are waiting for the owner to approve.`);
+  if (AGENT.journal.length) {
+    const last = AGENT.journal.slice(-3).map((j) => `${j.label} (${j.detail})`).join("; ");
+    bits.push(`Recent changes: ${last}.`);
+  }
+  return bits.join(" ");
+}
+
+const agentHistory = () => AGENT.messages.filter((m) => m.text).map((m) => ({
+  role: m.role === "system" ? "system" : m.role,
+  content: String(m.text).slice(0, 2000),
+}));
+
+/* A reply is "failed" when a model was asked for and none answered: no
+   response at all, or an engine that fell back to its rules (source "").
+   `heuristic` is not a failure — that is a server with no key, which has
+   something useful to say about attaching one. */
+const agentTurnFailed = (r) => !r || r.source === "";
+const AGENT_DOWN_LINE = "I could not reach the model just now — check the connection and try again.";
+const agentSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function agentTurn() {
+  const wait = AGENT_GAP - (Date.now() - AGENT_LAST_CALL);
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  AGENT_LAST_CALL = Date.now();
+  const payload = {
+    messages: agentHistory(),
+    tools: agentToolLines(),
+    context: await agentContext(),
+  };
+  const ask = () => {
+    if (aiConfigured() && typeof PWDB !== "undefined")
+      return offlineRequest("POST", "/api/ai/chat", {}, payload);
+    return api("/api/ai/chat", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  };
+  let r = null;
+  try {
+    r = await ask();
+    /* Free tiers blip. One quiet retry beats telling the owner it is down
+       when it was only a dropped connection — but only once, and never in a
+       loop that would look like the app is hanging. */
+    if (agentTurnFailed(r)) { await agentSleep(1500); r = await ask(); }
+  } catch (e) {
+    try { await agentSleep(1200); r = await ask(); } catch (e2) { r = null; }
+  }
+  if (aiConfigured() && typeof PWDB !== "undefined") {
+    if (r && r.source !== "model") {
+      AI_LAST_ERROR = `Could not reach ${aiModel()} — the assistant is guessing.`;
+    } else { AI_LAST_ERROR = ""; }
+    renderAiStrip();
+  }
+  const failed = agentTurnFailed(r);
+  const out = agentParse(!failed && r && r.text ? r.text : "");
+  out.failed = failed;
+  if (failed && !out.reply) out.reply = AGENT_DOWN_LINE;
+  return out;
+}
+
+/* The contract is one JSON object. A model that disobeys still gets to talk:
+   its raw text becomes the reply instead of an exception. */
+function agentParse(raw) {
+  const out = { reply: String(raw || "").trim(), actions: [] };
+  const s = out.reply.replace(/^```[A-Za-z]*\s*/, "").replace(/\s*```$/, "").trim();
+  const bases = [s];
+  const open = s.indexOf("{"), close = s.lastIndexOf("}");
+  if (open > -1 && close > open + 1) {
+    const mid = s.slice(open, close + 1);
+    if (mid !== s) bases.push(mid);
+  }
+  const parse = (t) => {
+    try {
+      const p = JSON.parse(t);
+      return (p && typeof p === "object" && !Array.isArray(p)) ? p : null;
+    } catch (e) { return null; }
+  };
+  const balance = (t) => {
+    let inStr = false, esc = false;
+    const stack = [];
+    for (const ch of t) {
+      if (esc) { esc = false; continue; }
+      if (inStr) { if (ch === "\\") esc = true; else if (ch === '"') inStr = false; continue; }
+      if (ch === '"') inStr = true;
+      else if (ch === "{" || ch === "[") stack.push(ch === "{" ? "}" : "]");
+      else if (ch === "}" || ch === "]") stack.pop();
+    }
+    if (!inStr && !stack.length) return null;
+    return t + (inStr ? '"' : "") + stack.reverse().join("");
+  };
+  let obj = null;
+  for (const base of bases) {
+    let t = base;
+    for (let i = 0; i <= 8 && t && !obj; i++) {
+      obj = parse(t);
+      if (obj) break;
+      const n = t.replace(/[}\]\s`]$/, "");
+      if (n === t) {
+        const fixed = balance(t);
+        if (fixed) obj = parse(fixed);
+        break;
+      }
+      t = n;
+    }
+    if (obj) break;
+  }
+  if (obj) {
+    if (typeof obj.reply === "string") out.reply = obj.reply;
+    if (Array.isArray(obj.actions)) {
+      out.actions = obj.actions.filter((a) => a && typeof a === "object")
+        .map((a) => ({ tool: String(a.tool || ""), args: (a.args && typeof a.args === "object") ? a.args : {} }))
+        .filter((a) => !!AGENT_TOOL(a.tool));
+    }
+  }
+  if (!out.reply) out.reply = "…";
+  return out;
+}
+
+/* ---------- the loop ----------
+   A turn may ask for reads. Those run immediately and their answers go back
+   as a system message so the model can finish the thought — but a write never
+   runs inside the loop, it becomes a card and the loop stops there. */
+async function agentLoop(maxTurns) {
+  /* A decision wraps a loop; the loop must hand the flag back the way it
+     found it rather than releasing a caller's work in progress. */
+  const outer = AGENT_BUSY;
+  AGENT_BUSY = true;
+  try {
+    renderAgent();
+    for (let i = 0; i < (maxTurns || AGENT_TURNS); i++) {
+      const turn = await agentTurn();
+      const msg = { role: "assistant", text: turn.reply, cards: [], mid: AGENT.seq++ };
+      AGENT.messages.push(msg);
+      /* Voice on means *read my replies*, not "make me press 🔈 every time" —
+         the previous utterance is cancelled by agentSpeak before this one. */
+      if (AGENT.voice && msg.text && !turn.failed) agentSpeak(msg.mid);
+      /* The model could not be reached: say so once, offer the way back in,
+         and stop — running the loop again would just repeat the failure. */
+      if (turn.failed) { msg.retry = true; renderAgent(); break; }
+      const reads = [];
+      const allowed = agentTools().map((t) => t.id);
+      for (const a of turn.actions) {
+        if (allowed.indexOf(a.tool) === -1) continue;
+        const tool = AGENT_TOOL(a.tool);
+        if (tool.id === "import_slip") {
+          /* One pasted slip becomes one card per line, all of them pending
+             together — the expansion is the tool, not a proposal of its own. */
+          const cards = await agentSlipCards(a.args);
+          for (const c of cards) msg.cards.push(c);
+          continue;
+        }
+        if (tool.risk === "read") reads.push(a);
+        else if (!msg.cards.some((c) => c.type === "ask" && c.tool === a.tool))
+          msg.cards.push(await agentPrepare(tool, a.args));
+      }
+      renderAgent();
+      if (!reads.length) { msg.follow = agentFollowups(msg); renderAgent(); break; }
+      const seen = [];
+      for (const a of reads) {
+        const tool = AGENT_TOOL(a.tool);
+        if (seen.indexOf(a.tool) !== -1) continue;
+        seen.push(a.tool);
+        const out = await agentRunTool(tool, a.args);
+        if (out && out.file) {
+          msg.cards.push({ type: "file", tool: tool.id, fid: out.file.fid,
+                           name: out.file.name, format: out.file.format });
+        }
+        msg.cards.push({ type: "result", tool: tool.id, label: tool.label,
+                         text: out.ok === false ? out.error || "could not do that" : out.text });
+      }
+      AGENT.messages.push({ role: "system", hidden: true,
+        text: "Read results:\n" + msg.cards.filter((c) => c.type === "result")
+          .map((c) => `${c.tool}: ${c.text}`).join("\n") });
+      msg.follow = agentFollowups(msg);
+      renderAgent();
+    }
+  } catch (e) {
+    AGENT.messages.push({ role: "assistant", text: `Something went wrong: ${e.message}` });
+  } finally {
+    AGENT_BUSY = outer;
+    saveAgent();
+    try { renderAgent(); } catch (e) { /* never strand the panel busy */ }
+  }
+}
+
+async function agentSend(text) {
+  const t = String(text || "").trim();
+  if (!t || AGENT_BUSY) return;
+  AGENT.messages.push({ role: "user", text: t, mid: AGENT.seq++ });
+  const input = $("#agent-input");
+  if (input) input.value = "";
+  saveAgent();
+  renderAgent();
+  await agentLoop();
+}
+
+/* ---------- what to offer next ----------
+   Two chips, chosen from what the model just did — the cheapest way to make
+   a chat feel like a conversation instead of a terminal. */
+function agentFollowups(msg) {
+  const cards = (msg && msg.cards) || [];
+  const tools = cards.filter((c) => c.type === "result").map((c) => c.tool);
+  const asked = cards.filter((c) => c.type === "ask" && c.status !== "failed").map((c) => c.tool);
+  const has = (t) => tools.indexOf(t) !== -1 || asked.indexOf(t) !== -1;
+  const out = [];
+  if (has("overview") || has("get_analytics") || has("compare_months")) {
+    out.push("What do we owe right now?", "Compare with last month");
+  }
+  if (has("search_purchases") || has("get_purchase")) {
+    out.push("Which supplier cost us the most?", "Show the biggest purchases");
+  }
+  if (has("list_credits") || has("budget_health")) out.push("Build me a PDF report");
+  if (has("get_reminders")) out.push("Open the credits screen");
+  if (has("list_catalogue") || has("price_trend")) out.push("Which item got more expensive?");
+  if (asked.length) out.push("What have you changed so far?");
+  if (!out.length) out.push("How much did we spend this month?", "What do we owe right now?");
+  const seen = [];
+  return out.filter((c) => { if (seen.indexOf(c) !== -1) return false; seen.push(c); return true; }).slice(0, 2);
+}
+
+/* The owner's own pasted text, if the model did not carry it along: the
+   message it is answering is the slip more often than not. */
+function agentLastUserText() {
+  for (let i = AGENT.messages.length - 1; i >= 0; i--) {
+    const m = AGENT.messages[i];
+    if (m && m.role === "user" && m.text) return String(m.text);
+  }
+  return "";
+}
+
+const agentFailCard = (toolId, error) => ({
+  type: "ask", tool: toolId,
+  label: (AGENT_TOOL(toolId) || {}).label || toolId,
+  risk: (AGENT_TOOL(toolId) || {}).risk || "write",
+  aid: AGENT.seq++, status: "failed", error, lines: [],
+});
+
+/* One pasted slip → one approval card per line. Extraction is the same call
+   the New-purchase dialog makes (so the same rules, the same model, the same
+   offline fallback), and nothing is written here — each card goes through the
+   ordinary approve path when the owner taps it. */
+async function agentSlipCards(args) {
+  const a = args && typeof args === "object" ? args : {};
+  const text = String(a.text || agentLastUserText()).trim().slice(0, 4000);
+  if (!text) return [agentFailCard("import_slip", "there was no text to read")];
+  let r = null;
+  try { r = await aiExtractRequest({ text }); } catch (e) {
+    return [agentFailCard("import_slip", e.message)];
+  }
+  const draft = (r && r.draft) || (r && r.data && r.data.draft) || null;
+  const items = (draft && draft.items) || [];
+  if (!draft || !items.length)
+    return [agentFailCard("import_slip", "nothing readable in that text")];
+  const uncertain = (r && r.uncertain) || [];
+  const base = { date: draft.date, distributor: draft.distributor,
+                 payment_method: draft.payment_method, memo: draft.memo };
+  const cards = [];
+  for (let i = 0; i < items.length; i++) {
+    const card = await agentPrepare(AGENT_TOOL("create_purchase"),
+      Object.assign({}, base, items[i]));
+    if (items.length > 1)
+      card.label = `Record a purchase (${i + 1} of ${items.length})`;
+    if (uncertain.length)
+      for (const u of uncertain.slice(0, 3))
+        card.lines.push(`⚠ ${(u && u.field) || "field"}: ${(u && u.why) || "check this"}`);
+    cards.push(card);
+  }
+  return cards;
+}
+
+/* ---------- the dashboard's own reminders, shared with the model ---------- */
+let AGENT_ALERTS = null;
+let AGENT_ALERTS_AT = 0;
+
+async function agentDashboardData() {
+  const [cr, bg, an] = await Promise.all([
+    api("/api/credits"),
+    api(`/api/budget?year=${new Date().getFullYear()}&month=${new Date().getMonth() + 1}`),
+    api("/api/analytics?n=6"),
+  ]);
+  return { creds: cr, budget: bg, a: an };
+}
+
+async function agentAlerts(force) {
+  const now = Date.now();
+  if (!force && AGENT_ALERTS && now - AGENT_ALERTS_AT < 30000) return AGENT_ALERTS;
+  try {
+    AGENT_ALERTS = buildAlerts(await agentDashboardData());
+  } catch (e) { AGENT_ALERTS = AGENT_ALERTS || []; }
+  AGENT_ALERTS_AT = now;
+  return AGENT_ALERTS;
+}
+
+/* ---------- the briefing ----------
+   Said on opening an empty conversation, built here rather than by the model
+   so it works with no key at all: what needs attention, and how far the
+   assistant can reach today. */
+let AGENT_BRIEF = null;
+
+async function agentBriefing() {
+  if (AGENT.messages.length) { AGENT_BRIEF = null; return; }
+  let alerts = [];
+  try { alerts = await agentAlerts(); } catch (e) { alerts = []; }
+  if (AGENT.messages.length) { AGENT_BRIEF = null; return; }
+  const hour = new Date().getHours();
+  const locked = agentLocked().length;
+  AGENT_BRIEF = {
+    hello: greetingFor(hour),
+    alerts: alerts.slice(0, 3).map((x) => `${x.icon} ${x.title}`),
+    reach: aiConfigured()
+      ? (locked ? `Attached · ${locked} hand(s) the coverage switch holds back`
+                : "Attached · every hand is available")
+      : "No model attached yet — add a free key under ⚙️ and I take over from there.",
+  };
+  renderAgent();
+}
+
+/* After a Yes/No the owner deserves an answer in words, not just a tick. */
+async function agentFollowup(note) {
+  AGENT.messages.push({ role: "system", hidden: true, text: note });
+  await agentLoop(1);
+}
+
+/* The owner tapped "Try again": the failed reply is folded away and the
+   question is asked once more — one retry of our own, not a loop. */
+async function agentRetry(mid) {
+  if (AGENT_BUSY) return;
+  const i = AGENT.messages.findIndex((m) => m && m.mid === mid && m.retry);
+  if (i >= 0) AGENT.messages.splice(i, 1);
+  saveAgent();
+  renderAgent();
+  await agentLoop(1);
+}
+
+/* ---------- building an approval card ---------- */
+async function agentPrepare(tool, args) {
+  const a = args || {};
+  const card = { type: "ask", tool: tool.id, label: tool.label, risk: tool.risk,
+                 aid: AGENT.seq++, status: "pending", lines: [], args: a };
+  const br = (id) => {
+    const b = META && (META.branches || []).find((x) => x.id === Number(id));
+    return b ? b.name : "Main Shop";
+  };
+  if (tool.id === "create_purchase") {
+    const row = agentPurchaseArgs(a);
+    card.lines = [
+      `${row.date} · ${br(row.branch_id)}`,
+      `${row.distributor} · ${row.product} × ${row.quantity} ${row.unit}`,
+      `${cur(row.total_amount)} via ${row.payment_method}`,
+    ];
+    if (row.memo) card.lines.push(`memo: ${row.memo}`);
+    card.args = row;
+  } else if (tool.id === "create_income") {
+    const row = agentIncomeArgs(a);
+    card.lines = [`${row.date} · ${br(row.branch_id)}`, `${cur(row.amount)} from ${row.source}`];
+    if (row.reference) card.lines.push(`ref ${row.reference}`);
+    card.args = row;
+  } else if (tool.id === "delete_purchase") {
+    const row = await agentFindPurchase(Number(a.purchase_id) || 0);
+    if (!row) { card.status = "failed"; card.error = "no purchase with that id"; return card; }
+    card.before = row;
+    const b = META && (META.branches || []).find((x) => x.id === row.branch_id);
+    card.lines = [
+      `${row.date} · ${(b && b.name) || "Main Shop"}`,
+      `${row.product} × ${row.quantity} ${row.unit} · ${cur(row.total)}`,
+      row.payment_method === "Credit"
+        ? "on credit — payments against it would go too, so this cannot be undone"
+        : "the row will be gone; it can be put back from the log",
+    ];
+    card.inverse = row.payment_method === "Credit" ? null
+      : { tool: "create_purchase", args: agentRowToPurchaseArgs(row) };
+    if (!META || !META.branches) card.inverse = null;
+    if (!card.inverse) card.undoable = false; else card.undoable = true;
+  } else if (tool.id === "delete_income") {
+    const rows = await agentFetchAll("/api/income", "rows");
+    const row = rows.find((x) => x.id === Number(a.income_id));
+    if (!row) { card.status = "failed"; card.error = "no money-in row with that id"; return card; }
+    card.before = row;
+    card.lines = [`${row.date} · ${cur(row.amount)} from ${row.source}`];
+    card.inverse = { tool: "create_income", args: {
+      date: row.date, branch_id: row.branch_id, amount: row.amount,
+      source: row.source, reference: row.reference, memo: row.memo } };
+    card.undoable = true;
+  } else if (tool.id === "save_budget") {
+    const year = Number(a.year) || new Date().getFullYear();
+    const month = Number(a.month) || new Date().getMonth() + 1;
+    const prev = await api(`/api/budget?year=${year}&month=${month}`);
+    card.lines = [
+      `${monthName(month)} ${year} · plan ${cur(Number(a.total_amount) || 0)}`,
+      `saving ${cur(Number(a.save_amount) || 0)}`,
+    ];
+    card.inverse = prev && prev.saved ? { tool: "save_budget", args: {
+      year, month, branch_id: prev.branch_id != null ? prev.branch_id : a.branch_id,
+      total_amount: prev.total_amount, save_amount: prev.save_amount,
+      allocations: prev.allocations } } : null;
+    card.undoable = !!card.inverse;
+  } else if (tool.id === "move_purchase") {
+    const row = await agentFindPurchase(Number(a.purchase_id) || 0);
+    if (!row) { card.status = "failed"; card.error = "no purchase with that id"; return card; }
+    const from = META && (META.branches || []).find((x) => x.id === row.branch_id);
+    card.lines = [`from ${from ? from.name : "?"} → ${br(a.branch_id)}`,
+                  `${row.product} · ${cur(row.total)}`];
+    card.inverse = { tool: "move_purchase", args: { purchase_id: row.id, branch_id: row.branch_id } };
+    card.undoable = true;
+  } else if (tool.id === "pay_credit") {
+    card.lines = [`pay ${cur(Number(a.amount) || 0)} toward purchase #${a.purchase_id}`,
+                  `on ${a.date || today()}`];
+    card.undoable = false;
+  } else if (tool.id === "add_branch") {
+    card.lines = [`new branch: ${String(a.name || "").slice(0, 60)}`,
+                  "branches cannot be deleted, so this one sticks"];
+    card.undoable = false;
+  } else if (tool.id === "undo_change") {
+    const j = AGENT.journal.find((x) => x.jid === Number(a.jid));
+    if (!j) { card.status = "failed"; card.error = "no such change in the log"; return card; }
+    if (!j.inverse) { card.status = "failed"; card.error = "that change cannot be put back"; return card; }
+    card.lines = [`put back the state before: ${j.label}`, j.detail];
+    card.args = Object.assign({}, j.inverse.args);
+    card.tool = j.inverse.tool;
+    card.label = `Undo · ${j.label}`;
+    card.undoTarget = j.jid;
+    card.inverse = null;
+    card.undoable = false;
+  } else if (tool.id === "propose_coverage") {
+    const wantOn = a.on !== false;
+    const area = AI_AREAS.find((x) => x.id === String(a.area || ""));
+    if (!area) { card.status = "failed"; card.error = "no such coverage switch"; return card; }
+    if (aiAllows(area.id) === wantOn) {
+      card.status = "failed";
+      card.error = `${area.label} is already ${wantOn ? "on" : "off"}`;
+      return card;
+    }
+    card.args = { area: area.id, on: wantOn };
+    card.label = `${wantOn ? "Switch on" : "Switch off"} “${area.label}”`;
+    card.lines = [`${area.ico} ${area.label} — ${wantOn ? "on" : "off"}`, area.note,
+                  "reversible any time in AI connection"];
+    card.inverse = { tool: "propose_coverage", args: { area: area.id, on: !wantOn } };
+    card.undoable = true;
+  } else {
+    card.lines = [JSON.stringify(a).slice(0, 200)];
+  }
+  return card;
+}
+
+/* ---------- running a tool ---------- */
+const agentPost = (path, body) =>
+  api(path, { method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body) });
+
+function agentPurchaseArgs(a) {
+  const branch = (META && META.branches && META.branches[0] && META.branches[0].id) || 1;
+  const pays = (META && META.payment_methods) || ["Cash"];
+  let pm = String(a.payment_method || "").trim();
+  if (pays.indexOf(pm) === -1) {
+    const hit = pays.find((p) => p.toLowerCase() === pm.toLowerCase());
+    if (hit) pm = hit;
+    else if (pm) pm = "Cash";
+    else pm = "Cash";
+  }
+  return {
+    date: /^\d{4}-\d{2}-\d{2}$/.test(String(a.date || "")) ? a.date : today(),
+    branch_id: Number(a.branch_id) || branch,
+    distributor: String(a.distributor || "").trim().slice(0, 80),
+    product: String(a.product || "").trim().slice(0, 80),
+    unit: String(a.unit || "bag").trim().slice(0, 20) || "bag",
+    quantity: Number(a.quantity) || 1,
+    total_amount: Number(a.total_amount) || 0,
+    payment_method: pm,
+    memo: String(a.memo || "").trim().slice(0, 140),
+    credit_paid: pm === "Credit" && a.credit_paid != null && a.credit_paid !== ""
+      ? Number(a.credit_paid) || 0 : undefined,
+  };
+}
+
+function agentRowToPurchaseArgs(r) {
+  /* The API's own row shape: `product`/`total`, with credit figures nested
+     under `credit`. Undo rebuilds a deleted row from exactly this. */
+  return { date: r.date, branch_id: r.branch_id, distributor: r.distributor,
+           product: r.product, unit: r.unit, quantity: r.quantity,
+           total_amount: r.total, payment_method: r.payment_method,
+           credit_paid: r.payment_method === "Credit" && r.credit ? r.credit.paid : undefined,
+           memo: r.memo };
+}
+
+function agentIncomeArgs(a) {
+  const branch = (META && META.branches && META.branches[0] && META.branches[0].id) || 1;
+  return {
+    date: /^\d{4}-\d{2}-\d{2}$/.test(String(a.date || "")) ? a.date : today(),
+    branch_id: Number(a.branch_id) || branch,
+    amount: Number(a.amount) || 0,
+    source: String(a.source || "").trim().slice(0, 80),
+    reference: String(a.reference || "").trim().slice(0, 40),
+    memo: String(a.memo || "").trim().slice(0, 140),
+  };
+}
+
+async function agentFetchAll(path, key) {
+  const out = [];
+  for (let page = 1; page <= 20; page++) {
+    const r = await api(`${path}?page=${page}&page_size=100`);
+    const rows = r && r[key] ? r[key] : [];
+    out.push(...rows);
+    if (!rows.length || (r.pages && page >= r.pages) || rows.length < 100) break;
+  }
+  return out;
+}
+
+async function agentFindPurchase(id) {
+  if (!id) return null;
+  const rows = await agentFetchAll("/api/purchases", "rows");
+  return rows.find((r) => r.id === id) || null;
+}
+
+async function agentRunTool(tool, args) {
+  try {
+    const a = args || {};
+    switch (tool.id) {
+      case "overview": {
+        const [an, cr] = await Promise.all([api("/api/analytics?n=2"), api("/api/credits")]);
+        const m = (an.months || [])[an.months.length - 1] || {};
+        const t = an.totals || {};
+        return { ok: true, data: { month: m.month, spend: m.spend, income: m.income,
+          outstanding: t.credit_outstanding, open_credits: t.open_credit_count },
+          text: `${m.month || ""}: spend ${cur(m.spend || 0)}, money in ${cur(m.income || 0)}, ` +
+                `${cur(t.credit_outstanding || 0)} owed across ${t.open_credit_count || 0} bill(s).` };
+      }
+      case "search_purchases": {
+        const q = new URLSearchParams();
+        if (a.q) q.set("q", String(a.q));
+        if (a.month) q.set("month", String(a.month));
+        if (a.branch_id) q.set("branch_id", String(a.branch_id));
+        q.set("page_size", String(Math.min(50, Number(a.limit) || 20)));
+        const r = await api(`/api/purchases?${q}`);
+        const rows = (r.rows || []).map((x) =>
+          `${x.date} ${x.distributor} ${x.product} x${x.quantity} ${cur(x.total)} ${x.payment_method}`);
+        return { ok: true, data: r, text: rows.length ? `${r.total} found:\n${rows.join("\n")}` : "no purchases matched." };
+      }
+      case "list_income": {
+        const q = new URLSearchParams();
+        if (a.month) q.set("month", String(a.month));
+        q.set("page_size", String(Math.min(50, Number(a.limit) || 20)));
+        const r = await api(`/api/income?${q}`);
+        const rows = (r.rows || []).map((x) => `${x.date} ${x.source} ${cur(x.amount)}`);
+        return { ok: true, data: r, text: rows.length ? `${r.total} found:\n${rows.join("\n")}` : "no money in recorded." };
+      }
+      case "list_credits": {
+        const r = await api("/api/credits");
+        const rows = (r.open || []).map((x) => `#${x.id} ${x.distributor || ""} ${cur(x.balance)} of ${cur(x.total)} left`);
+        return { ok: true, data: r, text: rows.length ? `${cur(r.outstanding)} outstanding:\n${rows.join("\n")}` : "nothing is owed." };
+      }
+      case "get_budget": {
+        const y = Number(a.year) || new Date().getFullYear();
+        const m = Number(a.month) || new Date().getMonth() + 1;
+        const r = await api(`/api/budget?year=${y}&month=${m}`);
+        return { ok: true, data: r,
+          text: r && r.saved ? `${monthName(m)} ${y}: plan ${cur(r.total_amount)}, saved ${cur(r.save_amount)}, spent so far ${cur(r.actual_spend || 0)}.`
+                             : `no budget saved for ${monthName(m)} ${y}.` };
+      }
+      case "get_analytics": {
+        const r = await api(`/api/analytics?n=${Math.min(24, Math.max(3, Number(a.n) || 6))}`);
+        const top = (r.top_items || []).slice(0, 5)
+          .map((x) => `${x.product} ${cur(x.spend)}`).join(", ");
+        return { ok: true, data: r,
+          text: `spend ${cur((r.totals || {}).spend || 0)} · in ${cur((r.totals || {}).income || 0)}. Top: ${top || "none"}.` };
+      }
+      case "list_catalogue": {
+        const r = await api("/api/meta");
+        return { ok: true, data: { products: r.products, distributors: r.distributors },
+          text: `items: ${(r.products || []).map((p) => p.name).join(", ") || "none"}.\n` +
+                `suppliers: ${(r.distributors || []).map((d) => d.name).join(", ") || "none"}.` };
+      }
+      case "list_changes": {
+        const rows = AGENT.journal.slice(-20).reverse()
+          .map((j) => `#${j.jid} ${j.ts} ${j.label} — ${j.detail}${j.undone ? " (undone)" : ""}`);
+        return { ok: true, data: AGENT.journal,
+          text: rows.length ? `${AGENT.journal.length} change(s):\n${rows.join("\n")}` : "nothing has been changed here yet." };
+      }
+      case "get_reminders": {
+        const list = await agentAlerts(true);
+        return { ok: true, data: list,
+          text: list.length
+            ? `${list.length} reminder(s), worst first:\n` +
+              list.map((x, i) => `${i + 1}. ${x.title} — ${x.detail}`).join("\n")
+            : "All quiet: no overdue credit, the budget is healthy and no item's price has spiked." };
+      }
+      case "compare_months": {
+        const n = Math.min(12, Math.max(2, Number(a.n) || 3));
+        const r = await api(`/api/analytics?n=${n}`);
+        const ms = r.months || [];
+        const rows = ms.map((m) => `${m.month}  spend ${cur(m.spend)}  in ${cur(m.income)}  ${m.buys} bill(s)`);
+        let change = "";
+        if (ms.length >= 2) {
+          const last = ms[ms.length - 1], prev = ms[ms.length - 2];
+          const d = prev.spend > 0 ? ((last.spend - prev.spend) / prev.spend) * 100 : 0;
+          change = `\n${last.month} vs ${prev.month}: spend ${d >= 0 ? "up" : "down"} ${Math.abs(d).toFixed(1)}%` +
+            (last.income >= last.spend ? " · money in still covers it" : " · money in did not cover it");
+        }
+        return { ok: true, data: ms, text: rows.join("\n") + change };
+      }
+      case "get_purchase": {
+        const row = await agentFindPurchase(Number(a.purchase_id) || 0);
+        if (!row) return { ok: false, error: "no purchase with that id" };
+        const b = META && (META.branches || []).find((x) => x.id === row.branch_id);
+        const cr = row.credit;
+        return { ok: true, data: row,
+          text: [`#${row.id}  ${row.date}  ${(b && b.name) || row.branch || "Main Shop"}`,
+                 `${row.distributor} · ${row.product} × ${row.quantity} ${row.unit}`,
+                 `total ${cur(row.total)} · unit ${cur(row.unit_price)} · ${row.payment_method}`]
+            .concat(cr && row.payment_method === "Credit"
+              ? [`paid ${cur(cr.paid)} · ${cur(cr.balance)} left · ${cr.percent}% settled`] : [])
+            .concat(row.memo ? [`memo: ${row.memo}`] : []).join("\n") };
+      }
+      case "search_income": {
+        const q = new URLSearchParams();
+        if (a.q) q.set("q", String(a.q));
+        if (a.month) q.set("month", String(a.month));
+        q.set("page_size", String(Math.min(50, Number(a.limit) || 20)));
+        const r = await api(`/api/income?${q}`);
+        const rows = (r.rows || []).map((x) =>
+          `${x.date}  ${x.source}${x.reference ? " · " + x.reference : ""}  ${cur(x.amount)}`);
+        return { ok: true, data: r,
+          text: rows.length ? `${r.total} found:\n${rows.join("\n")}` : "no money-in rows matched." };
+      }
+      case "budget_health": {
+        const y = Number(a.year) || new Date().getFullYear();
+        const m = Number(a.month) || new Date().getMonth() + 1;
+        const r = await api(`/api/budget?year=${y}&month=${m}`);
+        if (!r || !r.saved) return { ok: true, text: `no budget saved for ${monthName(m)} ${y}.` };
+        const spendable = Math.max((Number(r.total_amount) || 0) - (Number(r.save_amount) || 0), 0);
+        const spent = Number(r.actual_spend) || 0;
+        const left = spendable - spent;
+        const pct = spendable ? (spent / spendable) * 100 : 0;
+        const lines = [
+          `${monthName(m)} ${y}: plan ${cur(r.total_amount)} · saving ${cur(r.save_amount)}`,
+          `spendable ${cur(spendable)} · spent ${cur(spent)} (${pct.toFixed(0)}%) · ${left >= 0 ? `${cur(left)} left` : `${cur(-left)} over`}`,
+        ];
+        for (const al of (r.allocations || [])) {
+          const burn = Number(al.actual) || 0;
+          lines.push(`· ${al.name} ${al.percent}% — ${cur(burn)}`);
+        }
+        return { ok: true, data: r, text: lines.join("\n") };
+      }
+      case "price_trend": {
+        const name = String(a.product || "").trim();
+        const n = Math.min(24, Math.max(3, Number(a.n) || 12));
+        const r = await api(`/api/analytics?n=${n}`);
+        const all = r.unit_trend || [];
+        const hit = name
+          ? all.find((u) => String(u.product).toLowerCase() === name.toLowerCase()) ||
+            all.find((u) => String(u.product).toLowerCase().indexOf(name.toLowerCase()) !== -1)
+          : null;
+        if (!hit)
+          return { ok: true, data: [],
+            text: name ? `No unit-price history for "${name}" yet — it has not been bought in this window.`
+                       : "Name an item and I will show what it has been costing." };
+        const pts = (hit.points || []);
+        const rows = pts.map((p) => `${monthLabel(p.month)}  ${cur(p.avg)}`);
+        let move = "";
+        if (pts.length >= 2) {
+          const last = pts[pts.length - 1], prev = pts[pts.length - 2];
+          if (prev.avg > 0) {
+            const d = ((last.avg - prev.avg) / prev.avg) * 100;
+            move = `\n${d >= 0 ? "up" : "down"} ${Math.abs(d).toFixed(1)}% since ${monthLabel(prev.month)}`;
+          }
+        }
+        return { ok: true, data: hit, text: `${hit.product}, average unit price:\n${rows.join("\n")}${move}` };
+      }
+      case "top_suppliers": {
+        const n = Math.min(10, Math.max(1, Number(a.n) || 5));
+        const r = await api("/api/analytics?n=6");
+        const rows = (r.by_distributor || []).slice(0, n)
+          .map((d, i) => `${i + 1}. ${d.name}  ${cur(d.spend)}  ${d.share}% · ${d.buys} bill(s)`);
+        return { ok: true, data: (r.by_distributor || []).slice(0, n),
+          text: rows.length ? `Last 6 months:\n${rows.join("\n")}` : "no purchases on record yet." };
+      }
+      case "navigate": {
+        const v = String(a.view || "").trim();
+        if (AGENT_VIEWS.indexOf(v) === -1)
+          return { ok: false, error: `no screen called "${v.slice(0, 20)}"` };
+        await switchView(v);
+        return { ok: true, detail: `opened ${TITLES[v] || v}`,
+                 text: `Opened ${TITLES[v] || v} — it is behind this panel.` };
+      }
+      case "backup_books": {
+        const data = await buildBackup();
+        const body = JSON.stringify(data, null, 2);
+        const name = `pwbudget-backup-${today()}.json`;
+        const fid = "f" + (AGENT.seq++);
+        AGENT_FILES[fid] = { name, mime: "application/json", bytes: body };
+        return { ok: true, data: { name },
+          text: `backup ready: ${name} — download it and keep it somewhere safe. It is the whole book, both online and offline.`,
+          file: { fid, name, format: "json" } };
+      }
+      case "make_report": {
+        const rep = await agentBuildReport(a);
+        const fid = "f" + (AGENT.seq++);
+        AGENT_FILES[fid] = { name: rep.name, mime: rep.mime, bytes: rep.bytes };
+        return { ok: true, data: { name: rep.name }, text: `report ready: ${rep.name}`,
+                 file: { fid, name: rep.name, format: rep.format } };
+      }
+      default:
+        return await agentExecute(tool.id, a);
+    }
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+/* ---------- writes, and putting them back ---------- */
+async function agentExecute(toolId, a) {
+  switch (toolId) {
+    case "create_purchase": {
+      const args = agentPurchaseArgs(a);
+      const r = await agentPost("/api/purchases", args);
+      return { ok: true, id: r.id, inverse: { tool: "delete_purchase", args: { purchase_id: r.id } },
+        detail: `${args.distributor} · ${args.product} · ${cur(args.total_amount)}` };
+    }
+    case "create_income": {
+      const args = agentIncomeArgs(a);
+      const r = await agentPost("/api/income", args);
+      return { ok: true, id: r.id, inverse: { tool: "delete_income", args: { income_id: r.id } },
+        detail: `${args.source} · ${cur(args.amount)}` };
+    }
+    case "delete_purchase": {
+      const row = await agentFindPurchase(Number(a.purchase_id) || 0);
+      if (!row) return { ok: false, error: "no purchase with that id" };
+      await api(`/api/purchases/${row.id}`, { method: "DELETE" });
+      const undoable = row.payment_method !== "Credit" && !!(META && META.branches);
+      return { ok: true, detail: `${row.product} · ${cur(row.total)} deleted`,
+        before: row,
+        inverse: undoable ? { tool: "create_purchase", args: agentRowToPurchaseArgs(row) } : null };
+    }
+    case "delete_income": {
+      const rows = await agentFetchAll("/api/income", "rows");
+      const row = rows.find((x) => x.id === Number(a.income_id));
+      if (!row) return { ok: false, error: "no money-in row with that id" };
+      await api(`/api/income/${row.id}`, { method: "DELETE" });
+      return { ok: true, detail: `${row.source} · ${cur(row.amount)} deleted`, before: row,
+        inverse: { tool: "create_income", args: {
+          date: row.date, branch_id: row.branch_id, amount: row.amount,
+          source: row.source, reference: row.reference, memo: row.memo } } };
+    }
+    case "pay_credit": {
+      const args = { purchase_id: Number(a.purchase_id) || 0,
+        date: /^\d{4}-\d{2}-\d{2}$/.test(String(a.date || "")) ? a.date : today(),
+        amount: Number(a.amount) || 0, memo: String(a.memo || "").slice(0, 120) };
+      const r = await agentPost(`/api/purchases/${args.purchase_id}/pay`, args);
+      return { ok: true, detail: `${cur(args.amount)} paid toward #${args.purchase_id}`,
+        before: r.credit || null, inverse: null };
+    }
+    case "save_budget": {
+      const args = { year: Number(a.year) || new Date().getFullYear(),
+        month: Number(a.month) || new Date().getMonth() + 1,
+        branch_id: a.branch_id != null && a.branch_id !== "" ? Number(a.branch_id) : null,
+        total_amount: Number(a.total_amount) || 0, save_amount: Number(a.save_amount) || 0 };
+      const prev = await api(`/api/budget?year=${args.year}&month=${args.month}`);
+      const r = await agentPost("/api/budget", args);
+      return { ok: true, detail: `${monthName(args.month)} ${args.year} planned at ${cur(args.total_amount)}`,
+        before: prev && prev.saved ? prev : null,
+        inverse: prev && prev.saved ? { tool: "save_budget", args: {
+          year: args.year, month: args.month, branch_id: prev.branch_id != null ? prev.branch_id : args.branch_id,
+          total_amount: prev.total_amount, save_amount: prev.save_amount,
+          allocations: prev.allocations } } : null,
+        after: r };
+    }
+    case "add_branch": {
+      const args = { name: String(a.name || "").trim().slice(0, 60) };
+      const r = await agentPost("/api/branches", args);
+      return { ok: true, id: r.id, detail: `branch “${args.name}” added`, inverse: null };
+    }
+    case "propose_coverage": {
+      const area = AI_AREAS.find((x) => x.id === String(a.area || ""));
+      if (!area) return { ok: false, error: "no such coverage switch" };
+      const wantOn = a.on !== false;
+      if (aiAllows(area.id) === wantOn)
+        return { ok: false, error: `${area.label} is already ${wantOn ? "on" : "off"}` };
+      setAiArea(area.id, wantOn);
+      saveAI();
+      renderAiStrip();
+      renderAiAreas();
+      return { ok: true,
+        detail: `coverage “${area.label}” is ${wantOn ? "on" : "off"}`,
+        before: null,
+        inverse: { tool: "propose_coverage", args: { area: area.id, on: !wantOn } } };
+    }
+    case "move_purchase": {
+      const args = { purchase_id: Number(a.purchase_id) || 0, branch_id: Number(a.branch_id) || 0 };
+      const row = await agentFindPurchase(args.purchase_id);
+      const r = await agentPost(`/api/purchases/${args.purchase_id}/move`, args);
+      return { ok: true, id: r.id,
+        detail: `#${args.purchase_id} moved to branch ${args.branch_id}`,
+        before: row || null,
+        inverse: row ? { tool: "move_purchase", args: { purchase_id: row.id, branch_id: row.branch_id } } : null };
+    }
+    case "undo_change": {
+      const j = AGENT.journal.find((x) => x.jid === Number(a.jid));
+      if (!j) return { ok: false, error: "no such change in the log" };
+      if (!j.inverse) return { ok: false, error: "that change cannot be put back" };
+      const tool = AGENT_TOOL(j.inverse.tool);
+      if (!tool) return { ok: false, error: "unknown undo step" };
+      const res = await agentExecute(j.inverse.tool, j.inverse.args);
+      if (res.ok) { j.undone = true; saveAgent(); }
+      return res;
+    }
+    default:
+      return { ok: false, error: "unknown tool" };
+  }
+}
+
+function agentJournal(toolId, label, detail, res) {
+  AGENT.journal.push({
+    jid: AGENT.jseq++, ts: new Date().toISOString().slice(0, 19).replace("T", " "),
+    tool: toolId, label, detail,
+    before: res.before !== undefined ? res.before : null,
+    after: res.after !== undefined ? res.after : null,
+    inverse: res.inverse || null, undone: false,
+  });
+  while (AGENT.journal.length > AGENT_JOURNAL_MAX) AGENT.journal.shift();
+}
+
+function agentFindCard(aid) {
+  for (const m of AGENT.messages) {
+    const c = (m.cards || []).find((x) => x.type === "ask" && String(x.aid) === String(aid));
+    if (c) return { msg: m, card: c };
+  }
+  return null;
+}
+
+async function agentDecide(aid, approve, opts) {
+  const silent = !!(opts && opts.silent);      /* part of an approve-all run */
+  const hit = agentFindCard(aid);
+  if (!hit || hit.card.status !== "pending" || AGENT_BUSY) return;
+  const card = hit.card;
+  /* Busy covers the whole decision — writing, logging and the reply that
+     follows — so a second tap cannot run the same proposal twice. */
+  AGENT_BUSY = true;
+  card.status = approve ? "running" : "denied";
+  renderAgent();
+  try {
+    if (!approve) {
+      saveAgent();
+      if (!silent)
+        await agentFollowup(`The owner DENIED: ${card.label} — ${card.lines.join(" / ")}. Do not offer it again.`);
+      return;
+    }
+    const tool = AGENT_TOOL(card.tool);
+    const res = await agentExecute(card.tool, card.args);
+    if (!res.ok) throw new Error(res.error || "failed");
+    card.status = "done";
+    if (tool) agentJournal(card.tool, tool.label, res.detail || card.lines.join(" / "), res);
+    if (card.undoTarget != null) {
+      const j = AGENT.journal.find((x) => x.jid === card.undoTarget);
+      if (j) j.undone = true;
+    }
+    toast("✓ " + (res.detail || card.label));
+    await refreshMeta();
+    if (!silent)
+      await agentFollowup(`The owner APPROVED: ${card.label} — ${res.detail || "done"}. It is recorded now.`);
+  } catch (e) {
+    card.status = "failed";
+    card.error = e.message;
+    saveAgent();
+    renderAgent();
+    try {
+      if (!silent)
+        await agentFollowup(`The owner APPROVED ${card.label} but it FAILED: ${e.message}. Explain and offer a fix.`);
+    } catch (e2) { /* the failure is on the card already */ }
+  } finally {
+    AGENT_BUSY = false;
+    saveAgent();
+    renderAgent();
+    agentRefreshBody();
+  }
+}
+
+/* Several cards in one message are usually one intention ("record this
+   slip"): one tap for the lot, still card by card underneath, still one
+   reply at the end instead of one per card. */
+async function agentApproveAll(mid) {
+  if (AGENT_BUSY) return;
+  const msg = AGENT.messages.find((m) => m && String(m.mid) === String(mid));
+  if (!msg) return;
+  const pending = (msg.cards || []).filter((c) => c.type === "ask" && c.status === "pending");
+  if (!pending.length) return;
+  let done = 0;
+  for (const c of pending) {
+    await agentDecide(c.aid, true, { silent: true });
+    if (c.status === "done") done++;
+  }
+  if (done) {
+    try { await agentFollowup(`The owner APPROVED ${done} change(s) in one go. All are recorded.`); }
+    catch (e) { /* every card shows its own state already */ }
+  }
+}
+
+/* The panel sits on top of the app, so a change has to be visible underneath
+   once the owner closes it. */
+async function agentRefreshBody() {
+  try {
+    if (state.view === "dashboard") await loadDashboard();
+    else if (state.view === "purchases") await loadPurchases();
+    else if (state.view === "income") await loadIncome();
+    else if (state.view === "credits") await loadCredits();
+    else if (state.view === "analytics") await loadAnalytics();
+    else if (state.view === "budget") await loadBudget();
+    else await loadBranches();
+  } catch (e) { /* the panel is the truth right now */ }
+}
+
+function agentUndo(jid) {
+  AGENT.messages.push({ role: "user", text: `Undo change #${jid}`, mid: AGENT.seq++ });
+  saveAgent();
+  renderAgent();
+  agentLoop(1);
+}
+
+/* ---------- reports: PDF and Word, built right here ----------
+   A report is a view of data the browser already holds, so it is rendered
+   in the browser: no dependency, no upload, and it still works with the
+   server switched off. A PDF is written byte by byte; a .docx is a ZIP of
+   XML, and the ZIP below stores its entries uncompressed, which Word and
+   Google Docs both read happily. */
+const REPORT_KINDS = ["overview", "purchases", "income", "credits", "budget"];
+
+async function agentReportModel(kind, opts) {
+  const o = opts && typeof opts === "object" ? opts : {};
+  const now = new Date();
+  const y = Number(o.year) || now.getFullYear();
+  const m = Number(o.month) || now.getMonth() + 1;
+  const branch = o.branch_id != null && o.branch_id !== "" ? Number(o.branch_id) : null;
+  const bq = branch ? `&branch_id=${branch}` : "";
+  const title = {
+    overview: "Business overview", purchases: "Purchases", income: "Money in",
+    credits: "Credit owed", budget: "Budget",
+  }[kind] || "Report";
+  const rep = {
+    title: `PW Budget — ${title}`,
+    subtitle: `${monthName(m)} ${y} · ${branchLabel(branch != null ? branch : state.branch_id)}`,
+    generated: `Generated ${today()} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`,
+    sections: [],
+  };
+  const money = (n) => cur(Number(n) || 0);
+  if (kind === "overview") {
+    const [an, cr, bg] = await Promise.all([
+      api(`/api/analytics?n=6${bq}`), api(`/api/credits${branch ? `?branch_id=${branch}` : ""}`),
+      api(`/api/budget?year=${y}&month=${m}${bq}`)]);
+    const t = an.totals || {};
+    rep.sections.push({ heading: "Key figures",
+      columns: [{ h: "Measure", w: 3 }, { h: "Value", w: 2 }],
+      rows: [
+        ["Spend, last 6 months", money(t.spend)], ["Money in, last 6 months", money(t.income)],
+        ["Net", money(t.net)], ["Outstanding credit", money(t.credit_outstanding)],
+        ["Open credit accounts", String(t.open_credit_count || 0)],
+        ["Purchases recorded", String(t.buys || 0)],
+        ["Budget this month", bg && bg.saved ? money(bg.total_amount) : "not set"],
+        ["Spent this month", bg && bg.saved ? money(bg.actual_spend || 0) : "—"],
+      ] });
+    rep.sections.push({ heading: "Month by month",
+      columns: [{ h: "Month", w: 2 }, { h: "Spend", w: 2 }, { h: "Money in", w: 2 }, { h: "Bills", w: 1 }],
+      rows: (an.months || []).map((r) => [r.month, money(r.spend), money(r.income), String(r.buys || 0)]) });
+    rep.sections.push({ heading: "Where it goes",
+      columns: [{ h: "Item", w: 3 }, { h: "Qty", w: 1 }, { h: "Spend", w: 2 }, { h: "Share", w: 1 }],
+      rows: (an.top_items || []).slice(0, 12)
+        .map((r) => [r.product, String(r.qty), money(r.spend), `${r.share}%`]) });
+  } else if (kind === "purchases") {
+    const r = await api(`/api/purchases?page=1&page_size=300${bq}`);
+    rep.sections.push({ heading: `${r.total} purchase(s)`,
+      columns: [{ h: "Date", w: 2 }, { h: "Supplier", w: 3 }, { h: "Item", w: 3 },
+                { h: "Qty", w: 1 }, { h: "Total", w: 2 }, { h: "Paid via", w: 2 }],
+      rows: (r.rows || []).map((x) => [x.date, x.distributor, x.product,
+        String(x.quantity), money(x.total), x.payment_method]) });
+  } else if (kind === "income") {
+    const r = await api(`/api/income?page=1&page_size=300${bq}`);
+    rep.sections.push({ heading: `${r.total} row(s)`,
+      columns: [{ h: "Date", w: 2 }, { h: "Source", w: 4 }, { h: "Amount", w: 2 }, { h: "Ref", w: 2 }],
+      rows: (r.rows || []).map((x) => [x.date, x.source, money(x.amount), x.reference || "—"]) });
+  } else if (kind === "credits") {
+    const r = await api(`/api/credits${branch ? `?branch_id=${branch}` : ""}`);
+    const rows = (r.open || []).concat(r.settled || []);
+    rep.sections.push({ heading: `${money(r.outstanding)} outstanding`,
+      columns: [{ h: "Supplier", w: 3 }, { h: "Item", w: 3 }, { h: "Total", w: 2 },
+                { h: "Paid", w: 2 }, { h: "Left", w: 2 }],
+      rows: rows.map((x) => [x.distributor || "—", x.product || `#${x.id}`,
+        money(x.total), money(x.paid), money(x.balance)]) });
+  } else if (kind === "budget") {
+    const r = await api(`/api/budget?year=${y}&month=${m}${bq}`);
+    const total = Number(r && r.total_amount) || 0;
+    const save = Number(r && r.save_amount) || 0;
+    const spendable = Math.max(total - save, 0);
+    const spent = Number(r && r.actual_spend) || 0;
+    rep.sections.push({ heading: `${monthName(m)} ${y}`,
+      columns: [{ h: "Line", w: 3 }, { h: "Amount", w: 2 }],
+      rows: r && r.saved
+        ? [["Plan", money(total)], ["Saving", money(save)],
+           ["Spendable", money(spendable)],
+           ["Spent so far", money(spent)],
+           ["Left to spend", money(Math.max(spendable - spent, 0))]]
+        : [["No budget saved for this month", "—"]] });
+    if (r && r.allocations && r.allocations.length)
+      rep.sections.push({ heading: "Allocations",
+        columns: [{ h: "Category", w: 3 }, { h: "Percent", w: 1 }, { h: "Spent", w: 2 }],
+        rows: r.allocations.map((a) => [a.name, `${a.percent}%`, money(a.actual || 0)]) });
+  }
+  return rep;
+}
+
+async function agentBuildReport(args) {
+  const kind = REPORT_KINDS.indexOf(String(args && args.kind)) !== -1 ? args.kind : "overview";
+  const format = String((args && args.format) || "pdf").toLowerCase() === "docx" ? "docx" : "pdf";
+  const rep = await agentReportModel(kind, args);
+  const bytes = format === "docx" ? docxFromReport(rep) : pdfFromReport(rep);
+  return { name: `pwbudget-${kind}-${today()}.${format === "docx" ? "docx" : "pdf"}`,
+           mime: format === "docx"
+             ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+             : "application/pdf",
+           format, bytes };
+}
+
+function pdfFromReport(rep) {
+  const W = 595, H = 842, ML = 54, MR = 54, MT = 58, MB = 52;
+  const usable = W - ML - MR;
+  const pages = [];
+  let ops = [], y = H - MT;
+  /* Latin-1 has no cedi sign and the base-14 fonts have no glyphs past it, so
+     the handful of characters a report can contain are transliterated rather
+     than rendered as noise. */
+  const ascii = (s) => String(s == null ? "" : s)
+    .replace(/[\u20b5]/g, "GHS ").replace(/[\u2013\u2014]/g, "-")
+    .replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"')
+    .replace(/[\u2022\u00b7]/g, "-")
+    .replace(/[^\x20-\x7E]/g, "?")
+    .replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+  const newPage = () => { if (ops.length) pages.push(ops); ops = []; y = H - MT; };
+  const put = (s, x, size, bold) => {
+    ops.push(`BT /${bold ? "F2" : "F1"} ${size} Tf 1 0 0 1 ${x.toFixed(2)} ${y.toFixed(2)} Tm (${ascii(s)}) Tj ET`);
+  };
+  const write = (s, size, bold, x, gap) => {
+    if (y - (gap || size * 1.5) < MB) newPage();
+    put(s, x == null ? ML : x, size, bold);
+    y -= (gap || size * 1.5);
+  };
+  const rule = (w) => {
+    if (y < MB) newPage();
+    ops.push(`q ${ML.toFixed(2)} ${y.toFixed(2)} ${w.toFixed(2)} 0.7 re f Q`);
+    y -= 12;
+  };
+
+  write(rep.title, 17, true, ML, 22);
+  write(rep.subtitle, 10.5, false, ML, 14);
+  write(rep.generated, 9, false, ML, 16);
+  rule(usable);
+
+  for (const sec of rep.sections) {
+    write(sec.heading, 12, true, ML, 17);
+    const cols = sec.columns || [];
+    const total = cols.reduce((s, c) => s + (Number(c.w) || 1), 0) || 1;
+    const widths = cols.map((c) => usable * (Number(c.w) || 1) / total);
+    const xs = [];
+    let acc = ML;
+    for (const w of widths) { xs.push(acc); acc += w; }
+    cols.forEach((c, i) => {
+      if (y - 13 < MB) newPage();
+      put(ascii(c.h).slice(0, Math.floor(widths[i] / 4.4)), xs[i], 8.6, true);
+      y -= 13;
+    });
+    if (y < MB) newPage();
+    ops.push(`q ${ML.toFixed(2)} ${y.toFixed(2)} ${usable.toFixed(2)} 0.5 re f Q`);
+    y -= 13;
+    for (const row of sec.rows || []) {
+      if (y - 13 < MB) newPage();
+      row.forEach((cell, i) => {
+        if (i >= xs.length) return;
+        put(String(cell == null ? "" : cell).slice(0, Math.floor(widths[i] / 4.9)), xs[i], 9, false);
+      });
+      y -= 13.5;
+    }
+    y -= 9;
+  }
+  if (ops.length) pages.push(ops);
+  if (!pages.length) pages.push([`BT /F1 11 Tf 1 0 0 1 54 780 Tm (Nothing to report.) Tj ET`]);
+
+  const objs = [];
+  const nPages = pages.length;
+  const fontReg = 3 + nPages * 2, fontBold = fontReg + 1;
+  objs[1] = "<< /Type /Catalog /Pages 2 0 R >>";
+  const kids = pages.map((_, i) => `${3 + i * 2} 0 R`).join(" ");
+  objs[2] = `<< /Type /Pages /Kids [${kids}] /Count ${nPages} >>`;
+  pages.forEach((p, i) => {
+    const pid = 3 + i * 2, cid = pid + 1;
+    objs[pid] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] ` +
+      `/Resources << /Font << /F1 ${fontReg} 0 R /F2 ${fontBold} 0 R >> >> /Contents ${cid} 0 R >>`;
+    const stream = p.join("\n");
+    objs[cid] = `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
+  });
+  objs[fontReg] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>";
+  objs[fontBold] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>";
+
+  let out = "%PDF-1.4\n";
+  const offsets = [];
+  for (let i = 1; i < objs.length; i++) {
+    offsets[i] = out.length;
+    out += `${i} 0 obj\n${objs[i]}\nendobj\n`;
+  }
+  const start = out.length;
+  let xref = `xref\n0 ${objs.length}\n0000000000 65535 f \n`;
+  for (let i = 1; i < objs.length; i++)
+    xref += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
+  out += xref + `trailer\n<< /Size ${objs.length} /Root 1 0 R >>\nstartxref\n${start}\n%%EOF\n`;
+  return new TextEncoder().encode(out);
+}
+
+/* --- a minimal store-only ZIP, enough for a .docx --- */
+let CRC_TABLE = null;
+function crc32(bytes) {
+  if (!CRC_TABLE) {
+    CRC_TABLE = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      CRC_TABLE[n] = c >>> 0;
+    }
+  }
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+function zipStore(files) {
+  const enc = new TextEncoder();
+  const now = new Date();
+  const dosTime = ((now.getHours() & 31) << 11) | ((now.getMinutes() & 63) << 5) | ((now.getSeconds() / 2) & 31);
+  const dosDate = (((now.getFullYear() - 1980) & 127) << 9) | (((now.getMonth() + 1) & 15) << 5) | (now.getDate() & 31);
+  const locals = [], centrals = [];
+  let offset = 0;
+  /* little-endian, as the format demands — these write into a DataView, not
+     a byte array, so the setters (not index assignment) are the ones that
+     actually move the bits */
+  const u16 = (dv, i, v) => dv.setUint16(i, v & 0xffff, true);
+  const u32 = (dv, i, v) => dv.setUint32(i, v >>> 0, true);
+
+  for (const f of files) {
+    const name = enc.encode(f.name);
+    const data = f.data;
+    const crc = crc32(data);
+    const lh = new Uint8Array(30 + name.length);
+    const dv = new DataView(lh.buffer);
+    u32(dv, 0, 0x04034b50); u16(dv, 4, 20); u16(dv, 6, 0x0800);
+    u16(dv, 8, 0); u16(dv, 10, dosTime); u16(dv, 12, dosDate);
+    u32(dv, 14, crc); u32(dv, 18, data.length); u32(dv, 22, data.length);
+    u16(dv, 26, name.length); u16(dv, 28, 0);
+    lh.set(name, 30);
+    locals.push(lh, data);
+
+    const ch = new Uint8Array(46 + name.length);
+    const cv = new DataView(ch.buffer);
+    u32(cv, 0, 0x02014b50); u16(cv, 4, 20); u16(cv, 6, 20); u16(cv, 8, 0x0800);
+    u16(cv, 10, 0); u16(cv, 12, dosTime); u16(cv, 14, dosDate);
+    u32(cv, 16, crc); u32(cv, 20, data.length); u32(cv, 24, data.length);
+    u16(cv, 28, name.length); u32(cv, 42, offset);
+    ch.set(name, 46);
+    centrals.push(ch);
+    offset += lh.length + data.length;
+  }
+  const centralSize = centrals.reduce((s, c) => s + c.length, 0);
+  const end = new Uint8Array(22);
+  const ev = new DataView(end.buffer);
+  u32(ev, 0, 0x06054b50); u16(ev, 8, files.length); u16(ev, 10, files.length);
+  u32(ev, 12, centralSize); u32(ev, 16, offset);
+
+  const all = locals.concat(centrals, [end]);
+  const total = all.reduce((s, a) => s + a.length, 0);
+  const out = new Uint8Array(total);
+  let p = 0;
+  for (const a of all) { out.set(a, p); p += a.length; }
+  return out;
+}
+
+function docxXml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+
+function docxFromReport(rep) {
+  const enc = new TextEncoder();
+  const p = (runs) => `<w:p>${runs}</w:p>`;
+  const run = (text, bold, size) =>
+    `<w:r><w:rPr>${bold ? "<w:b/>" : ""}<w:sz w:val="${size || 20}"/></w:rPr>` +
+    `<w:t xml:space="preserve">${docxXml(text)}</w:t></w:r>`;
+  const paras = [
+    p(`<w:pPr><w:spacing w:after="60"/></w:pPr>${run(rep.title, true, 34)}`),
+    p(run(rep.subtitle, false, 22)),
+    p(run(rep.generated, false, 18)),
+  ];
+  for (const sec of rep.sections) {
+    paras.push(p(`<w:pPr><w:spacing w:before="240" w:after="80"/></w:pPr>${run(sec.heading, true, 26)}`));
+    const cols = sec.columns || [];
+    paras.push(p(cols.map((c) => run(c.h, true, 18)).reduce(
+      (acc, r, i) => acc + (i ? `<w:r><w:tab/></w:r>` : "") + r, "")));
+    for (const row of sec.rows || []) {
+      paras.push(p(String(row.map((c) => (c == null ? "" : c)).join("\t"))
+        .split("\t").map((c, i) => (i ? `<w:r><w:tab/></w:r>` : "") + run(c, false, 18))
+        .reduce((a, b) => a + b, "")));
+    }
+  }
+  const document = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>` +
+    paras.join("") +
+    `<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/></w:sectPr>
+</w:body></w:document>`;
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`;
+  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
+  return zipStore([
+    { name: "[Content_Types].xml", data: enc.encode(contentTypes) },
+    { name: "_rels/.rels", data: enc.encode(rels) },
+    { name: "word/document.xml", data: enc.encode(document) },
+  ]);
+}
+
+/* ---------- voice: the microphone and the reply read back ---------- */
+function agentRecognition() {
+  if (typeof window === "undefined") return null;
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
+function agentMic() {
+  const btn = $("#agent-mic");
+  if (AGENT_BUSY) return;
+  const Rec = agentRecognition();
+  if (!Rec) {
+    toast("Voice input needs Chrome or Edge — type it instead", "err");
+    return;
+  }
+  let rec;
+  try { rec = new Rec(); } catch (e) { toast("Voice input could not start", "err"); return; }
+  rec.lang = "en-GB";
+  rec.interimResults = false;
+  rec.maxAlternatives = 1;
+  if (btn) { btn.classList.add("on"); btn.setAttribute("aria-label", "Listening…"); }
+  rec.onresult = (e) => {
+    const said = e.results && e.results[0] && e.results[0][0]
+      ? e.results[0][0].transcript : "";
+    const input = $("#agent-input");
+    if (input) input.value = (input.value ? input.value + " " : "") + said;
+    agentAutogrow();
+  };
+  rec.onerror = () => toast("Could not hear that — try again", "err");
+  rec.onend = () => { if (btn) { btn.classList.remove("on"); btn.setAttribute("aria-label", "Speak"); } };
+  try { rec.start(); } catch (e) { if (btn) btn.classList.remove("on"); }
+}
+
+function agentSpeak(mid) {
+  if (!AGENT.voice) return;
+  if (typeof window === "undefined" || !window.speechSynthesis || !window.SpeechSynthesisUtterance) return;
+  const m = AGENT.messages.find((x) => String(x.mid) === String(mid));
+  if (!m || !m.text) return;
+  try {
+    window.speechSynthesis.cancel();
+    const u = new window.SpeechSynthesisUtterance(m.text);
+    u.lang = "en-GB";
+    window.speechSynthesis.speak(u);
+  } catch (e) { /* voice is a courtesy */ }
+}
+
+function agentToggleVoice() {
+  AGENT.voice = !AGENT.voice;
+  saveAgent();
+  const b = $("#agent-voice");
+  if (b) {
+    b.classList.toggle("on", AGENT.voice);
+    b.setAttribute("aria-pressed", AGENT.voice ? "true" : "false");
+    b.title = AGENT.voice ? "Replies are read aloud" : "Read replies aloud";
+  }
+  if (AGENT.voice) toast("Replies will be read aloud");
+  else if (typeof window !== "undefined" && window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch (e) {} }
+}
+
+function agentAutogrow() {
+  const i = $("#agent-input");
+  if (!i) return;
+  i.style.height = "auto";
+  i.style.height = Math.min(140, (i.scrollHeight || 40)) + "px";
+}
+
+/* ---------- attaching a file: the "upload data" half ---------- */
+async function agentAttach(file) {
+  if (!file) return;
+  const name = String(file.name || "file");
+  if (file.type && file.type.indexOf("image/") === 0) {
+    if (!aiAllows("capture")) {
+      toast("Turn on receipt capture in AI settings to read photos", "err");
+      return;
+    }
+    AGENT.messages.push({ role: "user", text: `📷 ${name}`, mid: AGENT.seq++ });
+    renderAgent();
+    AGENT_BUSY = true;
+    renderAgent();
+    try {
+      const text = await agentReadImage(file);
+      const r = await aiExtractRequest({ image: text });
+      const msg = { role: "assistant", text: "I read this off the slip — approve to record it.", cards: [] };
+      const draft = (r && (r.draft || r.data && r.data.draft)) || null;
+      if (draft) {
+        msg.cards.push({ type: "ask", tool: "create_purchase", label: "Record a purchase",
+          risk: "write", aid: AGENT.seq++, status: "pending",
+          lines: [`${draft.date || today()} · ${draft.distributor || "?"}`,
+                  (draft.items || []).map((i) => `${i.product} × ${i.quantity} ${i.unit} ${cur(i.total_amount)}`).join("; "),
+                  draft.payment_method || "payment not read"],
+          args: agentDraftToArgs(draft) });
+      } else {
+        msg.text = "I could not read anything off that image — paste the text instead.";
+      }
+      AGENT.messages.push(msg);
+    } catch (e) {
+      AGENT.messages.push({ role: "assistant", text: `That image did not read: ${e.message}` });
+    } finally {
+      AGENT_BUSY = false;
+      saveAgent();
+      renderAgent();
+    }
+    return;
+  }
+  const text = await agentReadText(file);
+  if (!text) { toast("That file had nothing readable in it", "err"); return; }
+  await agentSend(`📎 Attached "${name}":\n${text.slice(0, 3500)}`);
+}
+
+function agentDraftToArgs(d) {
+  const it = (d.items && d.items[0]) || {};
+  return { date: d.date, distributor: d.distributor, product: it.product, unit: it.unit,
+           quantity: it.quantity, total_amount: it.total_amount,
+           payment_method: d.payment_method, memo: d.memo };
+}
+
+function agentReadImage(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result || ""));
+    fr.onerror = () => reject(new Error("could not open the file"));
+    fr.readAsDataURL(file);
+  });
+}
+
+function agentReadText(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result || ""));
+    fr.onerror = () => reject(new Error("could not open the file"));
+    fr.readAsText(file);
+  });
+}
+
+/* ---------- the change log the owner can see ---------- */
+function renderJournal() {
+  const box = $("#journal-list");
+  if (!box) return;
+  if (!AGENT.journal.length) {
+    box.innerHTML = `<p class="hint">Nothing has been changed through the assistant yet.</p>`;
+    return;
+  }
+  box.innerHTML = AGENT.journal.slice().reverse().map((j) => `
+    <div class="jrow${j.undone ? " undone" : ""}">
+      <div class="jrow-head">
+        <span class="jrow-ts">${esc(j.ts)}</span>
+        <b>${esc(j.label)}</b>
+        ${j.undone ? `<span class="jrow-flag">undone</span>` : ""}
+      </div>
+      <div class="jrow-detail">${esc(j.detail)}</div>
+      ${j.before != null ? `<div class="jrow-before">before: <code>${esc(JSON.stringify(j.before).slice(0, 220))}</code></div>` : ""}
+      <div class="jrow-acts">
+        ${j.inverse && !j.undone
+          ? `<button type="button" class="btn ghost small" data-journal-undo="${j.jid}">↺ Put it back</button>` : ""}
+        <span class="jrow-id">#${j.jid}</span>
+      </div>
+    </div>`).join("");
+}
+
+function openJournal() {
+  renderJournal();
+  const dlg = $("#journal-dialog");
+  if (dlg && dlg.showModal) dlg.showModal();
 }
 
 /* ---------- capture → extract → confirm (AI) ----------
@@ -2572,6 +4361,99 @@ function bindAll() {
     // A test installs the key temporarily; closing puts the saved one back.
     pushProvider();
     renderAiStrip();
+    renderAgentStatus();
+  });
+
+  /* --- the assistant: open, speak, send, decide --- */
+  const agentFab = $("#agent-fab");
+  if (agentFab) agentFab.addEventListener("click", agentOpen);
+  const agentCloseBtn = $("#agent-close");
+  if (agentCloseBtn) agentCloseBtn.addEventListener("click", agentClose);
+  /* the dimmed backdrop behind the drawer is the other way out */
+  const agentScrim = $("#agent-scrim");
+  if (agentScrim) agentScrim.addEventListener("click", agentClose);
+  const agentMore = $("#btn-agent-more");
+  if (agentMore) agentMore.addEventListener("click", () => { closeMore(); agentOpen(); });
+  const agentSettings = $("#agent-settings");
+  if (agentSettings) agentSettings.addEventListener("click", openAiDialog);
+  const agentVoice = $("#agent-voice");
+  if (agentVoice) agentVoice.addEventListener("click", agentToggleVoice);
+  const agentJournal = $("#agent-journal");
+  if (agentJournal) agentJournal.addEventListener("click", openJournal);
+  const agentMicBtn = $("#agent-mic");
+  if (agentMicBtn) agentMicBtn.addEventListener("click", agentMic);
+  const agentAttach = $("#agent-attach-btn");
+  if (agentAttach) agentAttach.addEventListener("click", () => {
+    const f = $("#agent-file");
+    if (f) f.click();
+  });
+  const agentFile = $("#agent-file");
+  if (agentFile) agentFile.addEventListener("change", async (ev) => {
+    const input = ev.target;
+    const file = input && input.files && input.files[0];
+    input.value = "";              // the same file must be choosable again
+    if (file) await agentAttach(file);
+  });
+
+  const agentForm = $("#agent-form");
+  if (agentForm) agentForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const i = $("#agent-input");
+    agentSend(i ? i.value : "");
+  });
+  const agentInput = $("#agent-input");
+  if (agentInput) {
+    agentInput.addEventListener("input", agentAutogrow);
+    agentInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        const f = $("#agent-form");
+        if (f && f.requestSubmit) f.requestSubmit();
+        else agentSend(e.target.value);
+      }
+    });
+  }
+
+  /* Every button inside the conversation is reached through this one
+     listener: the list is rebuilt on every message, so per-button binds
+     would be lost after the first reply. */
+  const agentMsgs = $("#agent-msgs");
+  if (agentMsgs) agentMsgs.addEventListener("click", (e) => {
+    const t = e.target;
+    if (!t || !t.closest) return;
+    const chip = t.closest("[data-agent-chip]");
+    if (chip) { agentSend(chip.getAttribute("data-agent-chip")); return; }
+    const act = t.closest("[data-agent-act]");
+    if (!act) return;
+    const kind = act.getAttribute("data-agent-act");
+    if (kind === "approve" || kind === "deny")
+      agentDecide(act.getAttribute("data-aid"), kind === "approve");
+    else if (kind === "approve-all") agentApproveAll(act.getAttribute("data-mid"));
+    else if (kind === "retry") agentRetry(Number(act.getAttribute("data-mid")));
+    else if (kind === "open-ai") openAiDialog();
+    else if (kind === "speak") agentSpeak(act.getAttribute("data-mid"));
+    else if (kind === "download") {
+      const f = AGENT_FILES[act.getAttribute("data-fid")];
+      if (f) { if (downloadFile(f.name, f.mime, f.bytes)) toast("⤓ " + f.name); else toast("This browser blocked the download", "err"); }
+      else toast("Ask me to build it again", "err");
+    }
+  });
+
+  const journalList = $("#journal-list");
+  if (journalList) journalList.addEventListener("click", (e) => {
+    const t = e.target;
+    if (!t || !t.closest) return;
+    const u = t.closest("[data-journal-undo]");
+    if (!u) return;
+    const dlg = $("#journal-dialog");
+    if (dlg && dlg.close) dlg.close();
+    agentUndo(Number(u.getAttribute("data-journal-undo")));
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const shell = $("#agent-shell");
+    if (shell && shell.classList.contains("open")) agentClose();
   });
 
   // purchases filters
@@ -2756,6 +4638,8 @@ async function init() {
   bindAll();
   renderStorageBanner();   // a store that refused a write says so from the start
   renderAiStrip();
+  loadAgent();             // conversation + change log live on this device only
+  renderAgentStatus();
   initInstall();
 
   // prefetch credit cache for the pay dialog

@@ -136,6 +136,17 @@ module.exports = { calcEval, calcPush, fmtCalc, CALC_KEYS,
   finally { try { fs.unlinkSync(tmp); } catch (e) { /* already gone */ } }
 }
 
+/* Pull the model whitelist/patch helpers out of the real db.js without editing it. */
+function loadDbInternals() {
+  const src = fs.readFileSync(path.join(REPO, "public", "app", "db.js"), "utf8");
+  const tmp = path.join(REPO, `_audit_db_${process.pid}.js`);
+  fs.writeFileSync(tmp, src + `
+module.exports = { FIELD_ALIASES, applyPatch };
+`);
+  try { return require(tmp); }
+  finally { try { fs.unlinkSync(tmp); } catch (e) { /* already gone */ } }
+}
+
 /* ======================================================================
    1b. calculator battery
    ====================================================================== */
@@ -479,6 +490,16 @@ async function scenario(call) {
   });
   await step("ai:statement no rows", "POST", "/api/ai/statement", {},
     { text: "nothing useful here" });
+
+  /* the agent route: with no key both engines answer the same fixed line,
+     so this is a byte-for-byte check of the newest mirror */
+  await step("ai:chat empty", "POST", "/api/ai/chat", {}, {});
+  await step("ai:chat no provider", "POST", "/api/ai/chat", {}, {
+    messages: [{ role: "user", content: "what do we owe today?" }],
+    tools: ["list_credits", "search_purchases"],
+    context: "Branch: Main Shop",
+  });
+  await step("ai:chat text form", "POST", "/api/ai/chat", {}, { text: "hello" });
   await step("ai:unknown route", "POST", "/api/ai/nope", {}, {});
 
   return log;
@@ -724,7 +745,8 @@ async function auditFixtures() {
     // is exact — and avoids evaluating source.
     const CONTRACT = ["AI_SYSTEM", "AI_PROMPT_IMAGE", "AI_PROMPT_TEXT_PREFIX",
                       "AI_PROMPT_INSTRUCT", "AI_PROMPT_STATEMENT_IMAGE",
-                      "AI_PROMPT_STATEMENT_TEXT_PREFIX",
+                      "AI_PROMPT_STATEMENT_TEXT_PREFIX", "AI_PROMPT_AGENT",
+                      "AI_AGENT_OFFLINE", "AI_AGENT_DOWN",
                       "AI_IMAGE_ERROR", "AI_NOTHING_ERROR", "AI_READ_ERROR"];
     const grab = (src, name) => {
       const re = new RegExp("^\\s*(?:const\\s+)?" + name + "\\s*=\\s*(\".*\")\\s*;?\\s*$", "m");
@@ -741,6 +763,46 @@ async function auditFixtures() {
                 : `missing (server.py=${a ? "yes" : "no"}, db.js=${b ? "yes" : "no"})`);
     }
     console.log(`  ${CONTRACT.length} shared constant(s) compared`);
+
+    /* The instruct prompt advertises the canonical field names, and applyPatch
+       resolves a model's answer through FIELD_ALIASES. If a canonical name is
+       missing from that map the app silently discards a correct answer. */
+    console.log("\n== 6. instruct whitelist ==");
+    const aliasPairs = (src) => {
+      const start = src.indexOf("FIELD_ALIASES = {");
+      const open = start < 0 ? -1 : src.indexOf("{", start);
+      const close = open < 0 ? -1 : src.indexOf("}", open);
+      if (close < 0) return null;
+      const body = src.slice(open + 1, close).replace(/\s+/g, "");
+      const re = /(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*)):(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))(?:,|$)/g;
+      const out = [];
+      let m;
+      while ((m = re.exec(body))) out.push(`${m[1] || m[2]}->${m[3] || m[4]}`);
+      return out.sort();
+    };
+    const pyAlias = aliasPairs(pySrc), jsAlias = aliasPairs(jsSrc);
+    ok("FIELD_ALIASES is identical in both engines",
+       !!pyAlias && !!jsAlias && JSON.stringify(pyAlias) === JSON.stringify(jsAlias),
+       `server.py ${pyAlias && pyAlias.length} entries, db.js ${jsAlias && jsAlias.length} entries`
+       + (pyAlias && jsAlias && JSON.stringify(pyAlias) !== JSON.stringify(jsAlias)
+          ? `\n     only in server.py: ${pyAlias.filter((x) => !jsAlias.includes(x)).join(", ")}`
+            + `\n     only in db.js: ${jsAlias.filter((x) => !pyAlias.includes(x)).join(", ")}`
+          : ""));
+    const DBI = loadDbInternals();
+    const advertised = [...new Set(Object.values(DBI.FIELD_ALIASES))].sort();
+    for (const name of advertised) {
+      ok(`model's answer "${name}" is kept by applyPatch`,
+         DBI.FIELD_ALIASES[name] === name,
+         `FIELD_ALIASES[${JSON.stringify(name)}] = ${JSON.stringify(DBI.FIELD_ALIASES[name])}`);
+    }
+    const held = DBI.applyPatch({ total_amount: 24000, payment_method: "Mobile Money",
+                                  memo: "rush order", nonsense: 1 });
+    ok("applyPatch keeps canonical total_amount + payment_method",
+       held.changes.total_amount === 24000
+       && held.changes.payment_method === "Mobile Money"
+       && held.changes.memo === "rush order" && !("nonsense" in held.changes),
+       JSON.stringify(held));
+    console.log(`  ${advertised.length} advertised field(s) checked`);
 
     console.log(`\n==== ${pass} passed, ${fail} failed (${((Date.now() - started) / 1000).toFixed(1)}s) ====`);
     if (bad.length) { console.log("\nFAILURES:"); bad.forEach((b) => console.log(b)); }

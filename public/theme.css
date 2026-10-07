@@ -116,6 +116,7 @@ img { max-width:100%; }
 .btn {
   border:none; cursor:pointer; border-radius:var(--btn-radius); font-weight:700; font-size:14.5px;
   padding:11px 24px; text-decoration:none; display:inline-flex; align-items:center; gap:8px;
+  min-height:44px;   /* thumb-sized target on phones, matches the app's .btn */
   transition:transform .12s, box-shadow .2s, filter .15s, border-color .15s, color .15s;
   position:relative; overflow:hidden; font-family:var(--font);
 }

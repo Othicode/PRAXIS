@@ -1,10 +1,12 @@
 # Session status — handoff notes
 
 > **Read this first when starting a new session.** It is a snapshot of where
-> work stopped, what is green, and what is left. Last updated **2026-10-05**:
-> Phase 0 landed (backup / restore / CSV export + loud storage failures),
-> not yet committed; Phases 1–3 committed as `aa6eb20`, docs as `bed9f32`,
-> the Google-first AI connection work as `caf607e`.
+> work stopped, what is green, and what is left. Last updated **2026-10-07**:
+> the **assistant v2 (agentic) rework** landed (see §3, "Assistant v2") and is
+> **not yet committed** — the working tree still carries it on top of the last
+> commit (`4efa62e`). Phase 0 landed earlier uncommitted too; Phases 1–3
+> committed as `aa6eb20`, docs as `bed9f32`, Google-first AI connection as
+> `caf607e`.
 >
 > The product spec lives in `docs/AI_AUTOMATION_PLAN.md`; this file is only
 > about *state of the work*.
@@ -42,8 +44,8 @@ Constraints that are **not negotiable** (they break tests if violated):
 Run from the repo root:
 
 ```
-node smoke_test.js          -> 165 passed, 0 failed
-node audit_calculations.js  -> 160 passed, 0 failed (79 parity steps, 9 shared constants)
+node smoke_test.js          -> 229 passed, 0 failed
+node audit_calculations.js  -> 173 passed, 0 failed (12 shared constants)
 python tools/cleanup_smoke.py   -> clean (branches: Main Shop; purchases: 0)
 python tools/check_static.py    -> OK
 ```
@@ -82,7 +84,7 @@ Notes:
 
 ### Phase 2b — AI-native surface ✅
 - **AI connection** dialog: provider select (Groq / Gemini / OpenRouter /
-  custom OpenAI-compatible), key + model, *Test connection*, *Forget*.
+  DeepSeek / custom OpenAI-compatible), key + model, *Test connection*, *Forget*.
 - **AI status strip** on every screen (`on` / `off` / `bad` + coverage).
 - **Coverage** matrix — `capture` gates the scan bar, `catalogue` + `money`
   gate `payload.context`, `app` gates the instruction box.
@@ -155,6 +157,92 @@ stub for `document.querySelectorAll("#stmt-rows .stmt-tick")`, `reset()` on
 the stub `El`, income cleanup loop.
 `tools/cleanup_smoke.py` also wipes `income` where
 `memo LIKE 'smoke-%' OR reference LIKE 'SMK%' OR source LIKE 'Smoke takings%'`.
+
+---
+
+### Assistant v2 — the agentic pass ✅ (this session, **not yet committed**)
+
+The chat assistant was reworked from a thin prompt wrapper into an agent that
+knows its own limits, speaks between turns, and offers a small set of
+**human-approved write powers**. Four parts, all landed and green:
+
+**A — honesty + retry.**
+- `AGENT_TOOLS` grew to 24: added `get_purchase`, `compare_months`,
+  `get_reminders`, `price_trend`, `top_suppliers`, `navigate`,
+  `search_income`, `budget_health`, `import_slip`, `propose_coverage`
+  (`free: true` — always attached), `backup_books`; `make_report` args are now
+  `{kind, format, month?, year?, branch_id?}`.
+- Tools whose coverage is off are described to the model as
+  `name [locked]` + a `LOCKED — the owner has not switched on "…"` line
+  (`agentLocked` / `agentLockReason`), never silently dropped — and
+  `AI_PROMPT_AGENT` tells the model to never claim a locked hand and to offer
+  `propose_coverage` only when widening access would help. The prompt edit is
+  byte-identical in `server.py` and `db.js`.
+- `agentTurn()` retries once on a failed model call (1500ms, then 1200ms) and
+  returns `{reply, actions, failed}`; `agentLoop` marks the message
+  `retry: true` + breaks, and the card renders **Try again** (binding `retry`)
+  instead of a dead end.
+- `capAgentHistory()` runs in `saveAgent()`: sheds old hidden read-results
+  beyond 6, caps at 120 messages, never drops a pending card.
+
+**B — richer reads + talk between turns.**
+- 8 new read cases in `agentRunTool` (`price_trend` returns an item's average
+  unit price per month + % move, `compare_months` prints a `spend …` line,
+  `navigate` opens a view behind the panel, etc.).
+- `agentBriefing()` (client-side, works keyless) runs on `agentOpen()` and
+  renders “here is where the shop stands”: quiet/alerts line, top items,
+  distributor split, and where the assistant can reach
+  (`agentAlerts(force)` has a 30s cache; `agentDashboardData()` feeds it).
+- `agentFollowups(msg)` turns the last exchange into ≤2 quick chips;
+  `agentChips()` is coverage-aware (a money-off chip carries `act: "open-ai"`).
+- `agentContext()` now includes reminders; `renderAgentStatus()` appends
+  `N locked by coverage`.
+
+**C — write powers (every one still behind an Approve tap).**
+- `propose_coverage` (`free`) — proposes flipping a coverage switch; approving
+  runs `setAiArea` + `saveAI` + re-renders, and the inverse turns it off.
+- `import_slip` — one pasted slip → `agentSlipCards()` → one pending card per
+  line (`agentLoop` expands it; no card of its own).
+- `backup_books` — returns a file card into `AGENT_FILES` (same backup JSON
+  the *Your data* screen builds).
+- `agentApproveAll(mid)` / `agentDecide(…, {silent})` — **Approve all N** on a
+  multi-card message; each card still goes through the ordinary
+  `agentExecute` path.
+- `agentReportModel(kind, opts)` takes `month`/`year`/`branch_id` and filters
+  purchases/income/credits/budget/overview with `bq`; `agentBuildReport`
+  passes args through. Report **file name is unchanged** (smoke asserts it).
+
+**D — polish, docs, tests.**
+- Auto-speak new replies when voice is on (skipped on failure); bindings for
+  `approve-all`, `retry`, `open-ai`; styles for `.agent-brief`,
+  `.agent-follow`, `.agent-retry`, `.acard-acts.bulk`.
+- **Bug fixes found on the way**: the API row shape is `product`/`total`
+  (NOT `product_name`/`total_amount`); credit figures live at
+  `row.credit.*`. Corrected in `agentRowToPurchaseArgs`, `delete_purchase`
+  (card + detail), `move_purchase`, `search_purchases`, `get_purchase`, and
+  the purchases section of `agentReportModel`.
+- `CACHE = "pwbudget-v29"` in `sw.js`.
+- **Interface: the glass drawer.** The assistant no longer covers the app as a
+  flat panel — a dimmed, blurred scrim sits behind it and the shell becomes a
+  full-height sheet with rounded top on a phone, or a floating right-hand
+  card (min 470px, inset 14px) on a screen ≥760px. Glass header with an
+  avatar orb, title and a live status pill (green dot = model attached),
+  ghost icon controls; bot replies get a small ✦ avatar, new rows/cards fade
+  and rise in once (identity-tracked `AGENT_SEEN` WeakSets, so a re-render
+  never re-animates); the composer is one rounded capsule (attach · input ·
+  mic · gradient send) with a gold focus ring; approval cards get icon tiles;
+  the empty state gets a floating gold orb. Closes on ✕, Esc, or a tap on
+  the scrim. `prefers-reduced-motion` strips every transform.
+- **Tests**: 13 new smoke checks × 2 modes (locked lines, coverage proposal,
+  briefing, chips, follow-ups, retry, slip expansion, backup file, approve-all
+  + cleanup, history cap, new reads, navigate, month-scoped report), harness
+  exports grew to match; suite is **229 passed / 0 failed** (the presets
+  extension in §3.6 added one check, §3.7 three more), audit
+  **173 passed / 0 failed**, `check_static` + `cleanup_smoke` green.
+
+Rules that held: exactly **4** coverage areas (never add a 5th; defaults
+`capture` + `catalogue`), no internet search, no bank/PSD2/POS connections
+ever, nothing auto-commits.
 
 ---
 
@@ -283,6 +371,60 @@ The AI connection dialog is now genuinely *select provider → paste key → Sav
   is server-side only and is not offered as a device key. All three offered
   providers return a readable `Access-Control-Allow-Origin`.
 
+### 6. Presets extended (2026-10-07) — DeepSeek, Claude via OpenRouter
+
+A research pass over the four big platforms (Claude / Gemini / DeepSeek /
+ChatGPT), applied as app changes — nothing here touches the parity pair:
+
+- **DeepSeek preset added** (`AI_PROVIDERS` in `app.js`, before *Custom*):
+  OpenAI-compatible base `https://api.deepseek.com/v1`, ids `deepseek-v4-flash`
+  / `deepseek-v4-flash-vision-exp` / `deepseek-v4-pro` (read off DeepSeek's own
+  pricing docs), label *cheap, reads photos*, note says pay-per-use — **no
+  free-tier promise**. Cheapest vision-capable option (~$0.15/1M tokens in,
+  off-peak).
+- **OpenRouter datalist reaches Claude**: `anthropic/claude-haiku-4.5`, verified
+  against OpenRouter's live `GET /api/v1/models`. A paid id among the free
+  ones — the picker note says so, and the cross-provider rule keeps it on this
+  preset alone.
+- **DeepSeek CORS measured, not assumed**: `OPTIONS` from this app's own origin
+  → 200 with `access-control-allow-origin: http://127.0.0.1:8123` and
+  `access-control-allow-headers: authorization,content-type`.
+- **Claude direct and OpenAI direct deliberately skipped**: a direct Claude
+  preset needs a second wire format (Anthropic messages + the
+  `anthropic-dangerous-direct-browser-access` header) in *both* engines for no
+  free tier; OpenAI's browser CORS is flaky (its Responses API stopped sending
+  the header in Jan 2026) and also has no free tier — GPT models stay reachable
+  through Groq/OpenRouter.
+- 1 new smoke check × 2 modes; presets stay generic (`aiOwnModel()` needed no
+  change — new ids are on exactly one preset).
+
+### 7. The lost approval — root cause and fix (2026-10-07)
+
+The owner reported: an approved assistant change never showed up in
+purchases/budget/dashboard after an F5. Investigation (read-only) of Edge's
+`Local Storage\leveldb` for origin `http://127.0.0.1:8123` showed the whole
+story in `pwbudget.agent.v1`:
+
+- Their Gemini-key session asked for a banner purchase (40 GH₵) + budget; the
+  assistant correctly proposed **only** `propose_coverage` first (area `app` —
+  purchase/budget tools are locked without it). The owner approved it; the
+  journal has exactly that one entry (`jid 1`, `undone: false`). No
+  `create_purchase` card was ever rendered, so there was nothing else to
+  approve — and `ledger.db` (0 purchases) agrees.
+- The follow-up model reply (the one meant to carry the purchase) was stored
+  as **raw JSON**: `… "payment_method":"cash"}}]}}` — one stray `}` too many.
+  `agentParse` ran a single strict `JSON.parse`, threw *Extra data*, fell
+  back to "raw text becomes the reply", and **silently dropped the
+  `actions` array** — the card the owner expected never existed.
+
+Fix — `agentParse` (`app.js`) now salvages in order: the exact object (as
+before), incremental peel of stray trailing closers, the object sliced out of
+surrounding prose, and a balance pass that closes a string/container a
+cut-off reply left open. Unparseable text still becomes the reply (contract
+unchanged); only now a stray brace can no longer swallow an approval.
+3 new smoke checks × 2 modes pin each path — including their exact reply
+string. Suite **229 / 0**.
+
 ---
 
 ## 5. Environment / tooling gotchas (cost real time this session)
@@ -342,8 +484,19 @@ The AI connection dialog is now genuinely *select provider → paste key → Sav
 - `db.js`'s `applyPatch` / server's `_apply_patch` run the **same field
   whitelist** over model output as over user text — never trust a model field
   name directly.
+- **Purchase rows use `product` / `total`** (not `product_name` /
+  `total_amount` — that shape belongs to the backup JSON envelope only), and
+  credit figures live nested at `row.credit` (`paid`, `balance`, `percent`).
+- **`AI_PROMPT_AGENT` is one of the 12 shared constants** — every edit must be
+  mirrored byte-for-byte in `server.py` and `db.js` or audit fails. Prompt
+  text lives only in that pair, never in the UI.
+- **The assistant never writes by itself.** Every write tool renders a card
+  with an Approve tap (`agentExecute` is the only writer); coverage-off tools
+  are *described* to the model as locked, never hidden; `propose_coverage` is
+  the one `free: true` tool and is never gated by `app`. Exactly **4**
+  coverage areas — never add a 5th (smoke asserts the count).
 - Bump `CACHE` in `public/app/sw.js` whenever `app.js`/`db.js`/`styles.css`/
-  `index.html` change (cache-first SW).
+  `index.html` change (cache-first SW). Current: `pwbudget-v29`.
 
 ---
 
@@ -361,9 +514,9 @@ The AI connection dialog is now genuinely *select provider → paste key → Sav
   - The red banner only appears **after** a write fails; a device that is
     already full at load time shows it on boot (`init()` calls
     `renderStorageBanner()`), but there is no proactive free-space check.
-- **Real vision provider untested in a browser.** CORS for the three offered
-  providers is now **measured**: preflight passes for Groq (204), Gemini (200)
-  and OpenRouter (204), each returning a readable
+- **Real vision provider untested in a browser.** CORS for the offered
+  providers is now **measured**: preflight passes for Groq (204), Gemini (200),
+  OpenRouter (204) and DeepSeek (200), each returning a readable
   `Access-Control-Allow-Origin` — so the browser is allowed to call them.
   What is still untested is a **real key** making a real vision call (no key
   in this session, and no desktop browser connected). If it is ever blocked,
@@ -380,6 +533,11 @@ The AI connection dialog is now genuinely *select provider → paste key → Sav
   *More → Your data*, the **Money in** dialog (both used to render flush to the
   screen edge), the **More sheet** and the **calculator** held sideways (both
   used to clip), and tap a few controls for size.
+- **The assistant v2 pass (§3) has only been exercised headless** (smoke's DOM
+  stub, offline + server modes). Not yet checked on a handset: the brief card,
+  follow-up chips, **Approve all**, the *Try again* card, and voice auto-speak.
+  Also still untested with a **real attached model** — the failure/retry path
+  was proven against an unreachable endpoint, not a live provider rate-limit.
 
 ---
 
@@ -393,9 +551,10 @@ The AI connection dialog is now genuinely *select provider → paste key → Sav
 Other roadmap ideas in `README.md`: low-stock warnings per item, PIN lock on
 the installed app. (CSV export for the owner has since shipped — *Your data*.)
 
-**Suggested first move in a new session:** commit the Phase 0 work if the four
-test commands are still green, then pick **Phase 4** (knowledge base /
+**Suggested first move in a new session:** commit the uncommitted work
+(assistant v2 + Phase 0) if the four test commands are still green — **ask the
+owner before committing** — then pick **Phase 4** (knowledge base /
 `documents` / `references` / ask-your-books) — or run the still-unanswered
 **browser CORS check** against a real vision provider (§7), which decides
-whether live capture actually works before Phase 4 build on top of it. A real
+whether live capture actually works before Phase 4 builds on top of it. A real
 Gemini key end-to-end test of `/api/ai/extract` is also still outstanding.

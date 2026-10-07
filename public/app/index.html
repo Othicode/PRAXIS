@@ -355,6 +355,7 @@ setTimeout(function () {
     <button class="nav-btn" data-view="income"><span class="nav-ico">💰</span><span class="nav-txt">Money in</span></button>
     <button class="nav-btn" data-view="branches"><span class="nav-ico">🏬</span><span class="nav-txt">Branches</span></button>
     <button class="nav-btn" id="btn-calc-more"><span class="nav-ico">🧮</span><span class="nav-txt">Calculator</span></button>
+    <button class="nav-btn" id="btn-agent-more"><span class="nav-ico">✦</span><span class="nav-txt">Assistant</span></button>
     <button class="nav-btn" id="btn-ai-more"><span class="nav-ico">🤖</span><span class="nav-txt">AI settings</span></button>
     <button class="nav-btn" id="btn-data-more"><span class="nav-ico">💾</span><span class="nav-txt">Your data</span></button>
     <button class="nav-btn hidden" id="btn-install-more"><span class="nav-ico">⤓</span><span class="nav-txt">Install app</span></button>
@@ -593,6 +594,60 @@ setTimeout(function () {
 
   <div class="hint" id="data-progress"></div>
   <div class="form-err" id="data-err"></div>
+  <div class="dialog-foot">
+    <button type="button" class="btn primary" data-close>Done</button>
+  </div>
+</dialog>
+
+<!-- ============ AI assistant: the control centre ============
+     The app's parts are the model's body; this is the console it drives.
+     Nothing that changes a record happens until a hand presses Approve, and
+     every change is written to an on-device log with the state before it.
+     Presentation: a glass drawer over a dimmed scrim — full sheet on a
+     phone, floating right-hand card on a wide screen. -->
+<button class="agent-fab" id="agent-fab" aria-label="Open the AI assistant" title="AI assistant">✦</button>
+<div class="agent-scrim" id="agent-scrim" aria-hidden="true"></div>
+<div class="agent-shell" id="agent-shell" aria-hidden="true" aria-label="AI assistant">
+  <header class="agent-head">
+    <div class="agent-brand">
+      <span class="agent-av" aria-hidden="true">✦</span>
+      <div class="agent-head-txt">
+        <strong>Assistant</strong>
+        <span class="agent-pill" id="agent-pill"><i class="agent-dot"></i><span id="agent-status">…</span></span>
+      </div>
+    </div>
+    <span class="agent-head-acts">
+      <button class="icon-btn" id="agent-journal" type="button" aria-label="Change log" title="Change log">🕑</button>
+      <button class="icon-btn" id="agent-voice" type="button" aria-label="Read replies aloud" aria-pressed="false" title="Read replies aloud">🔊</button>
+      <button class="icon-btn" id="agent-settings" type="button" aria-label="AI settings" title="AI settings">⚙️</button>
+      <button class="icon-btn" id="agent-close" type="button" aria-label="Close assistant">✕</button>
+    </span>
+  </header>
+  <div class="agent-scroll" id="agent-scroll">
+    <div class="agent-msgs" id="agent-msgs"></div>
+  </div>
+  <form class="agent-form" id="agent-form" autocomplete="off">
+    <div class="agent-composer">
+      <button type="button" class="icon-btn agent-cbtn" id="agent-attach-btn" aria-label="Attach a photo or file" title="Attach a photo or file">📎</button>
+      <textarea id="agent-input" rows="1" maxlength="1500"
+        placeholder="Ask anything, or say what to change…"
+        aria-label="Message the assistant"></textarea>
+      <button type="button" class="icon-btn agent-cbtn" id="agent-mic" aria-label="Speak" title="Speak">🎤</button>
+      <button type="submit" class="agent-send" id="agent-send" aria-label="Send">➤</button>
+    </div>
+    <input type="file" id="agent-file" accept="image/*,.csv,.txt,.json,text/*" class="hidden">
+    <p class="agent-note">reads run straight away · anything that changes a record waits for your approval</p>
+  </form>
+</div>
+
+<!-- ============ Change log (on-device only, never in a backup) ============ -->
+<dialog id="journal-dialog">
+  <div class="dialog-head">
+    <h3>🕑 Change log</h3>
+    <button type="button" class="btn ghost small" data-close>✕</button>
+  </div>
+  <p class="dialog-sub">Everything the assistant has changed here, with the state it had before. Kept on this device only.</p>
+  <div class="journal-list" id="journal-list"></div>
   <div class="dialog-foot">
     <button type="button" class="btn primary" data-close>Done</button>
   </div>

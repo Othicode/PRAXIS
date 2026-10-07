@@ -609,6 +609,9 @@ const AI_PROMPT_TEXT_PREFIX = "Turn this note into a purchase draft JSON: {\"dat
 const AI_PROMPT_INSTRUCT = "Apply this edit to the bookkeeping draft and return only {\"op\":\"update\",\"changes\":{...}} with an empty changes object if the instruction does not name a field. Whitelisted fields: ";
 const AI_PROMPT_STATEMENT_IMAGE = "Read this statement image and return JSON {\"candidates\":[{\"date\":\"YYYY-MM-DD\",\"direction\":\"out|in\",\"amount\":0,\"description\":\"\",\"reference\":\"\"}],\"uncertain\":[{field,why,options[]}]}.";
 const AI_PROMPT_STATEMENT_TEXT_PREFIX = "Read this statement text and return JSON {\"candidates\":[{\"date\":\"YYYY-MM-DD\",\"direction\":\"out|in\",\"amount\":0,\"description\":\"\",\"reference\":\"\"}],\"uncertain\":[{field,why,options[]}]}.\n";
+const AI_PROMPT_AGENT = "You are the control centre of PW Budget, a bookkeeping app for a small shop. The owner types instructions here; the app is your body and the tools below are your hands. Answer with one JSON object only \u2014 no prose, no markdown: {\"reply\":\"what you say to the owner\",\"actions\":[{\"tool\":\"tool_id\",\"args\":{}}]}. Rules: use only the tools listed below and only the arguments they declare; propose at most what the instruction needs; never claim a change already happened, because every write is a proposal the owner approves by hand \u2014 write \"I will\", not \"I did\"; when you need data first, ask for the read tools and wait for the result; when the owner refuses, adjust instead of repeating yourself; when nothing fits, say so plainly and name the closest tool. Tools marked [locked] are held by a coverage switch the owner has left off: never claim you can run one, and offer propose_coverage only when widening access would actually help.";
+const AI_AGENT_OFFLINE = "I can think, but there is no model attached to this device. Add a free key under Settings \u2192 AI connection and I will take over from there.";
+const AI_AGENT_DOWN = "I could not reach the model just now \u2014 check the connection and try again.";
 
 /* The device-supplied model connection. This is the offline engine's counterpart
    of server.py's AI_API_KEY / AI_BASE_URL / AI_MODEL: the owner picks a provider
@@ -628,8 +631,11 @@ function setProvider(cfg) {
 function providerSet() { return AI_PROVIDER !== null; }
 
 /* One chat completion. Returns the model's text, or null on any failure — an
-   unreachable model must never break a core path (mirrors server.py _ai_chat). */
-async function aiChat(prompt, image) {
+   unreachable model must never break a core path (mirrors server.py _ai_chat).
+   `system` overrides the extraction contract for routes that are not about
+   receipts — the agent chat, for instance. Callers that pass nothing keep
+   AI_SYSTEM, so every existing path behaves exactly as before. */
+async function aiChat(prompt, image, system) {
   const cfg = AI_PROVIDER;
   if (!cfg) return null;
   const content = [{ type: "text", text: prompt }];
@@ -647,7 +653,7 @@ async function aiChat(prompt, image) {
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.key}` },
       body: JSON.stringify({
         model: cfg.model, temperature: 0,
-        messages: [{ role: "system", content: AI_SYSTEM }, { role: "user", content }],
+        messages: [{ role: "system", content: system || AI_SYSTEM }, { role: "user", content }],
       }),
     });
     if (!res.ok) return null;
@@ -702,11 +708,13 @@ const FIELD_ALIASES = {
   distributor: "distributor", supplier: "distributor", vendor: "distributor",
   date: "date",
   payment: "payment_method", "payment method": "payment_method", method: "payment_method",
+  payment_method: "payment_method",
   memo: "memo", note: "memo",
   product: "product", item: "product",
   unit: "unit",
   quantity: "quantity", qty: "quantity",
   amount: "total_amount", total: "total_amount",
+  total_amount: "total_amount",
 };
 const NUMERIC_FIELDS = ["quantity", "total_amount"];
 const TEXT_LIMITS = { distributor: 80, product: 80, unit: 20, memo: 140 };
@@ -896,6 +904,33 @@ function applyPatch(changes) {
   }
   if (!Object.keys(clean).length) return { op: "none", changes: {} };
   return { op: "update", target: "purchase_draft", changes: clean };
+}
+
+/* The agent's one call. The model never touches a record here: it is handed a
+   description of the tools it may propose, whatever the owner's coverage lets
+   it know, and the conversation so far, and it answers with what to say plus
+   the actions it would like to run. Carrying those out — and asking permission
+   first — is the app's job, not the model's. Mirror of server.py ai_agent(). */
+async function aiAgent(payload) {
+  const msgs = payload && Array.isArray(payload.messages) ? payload.messages : null;
+  const single = payload && typeof payload.text === "string" ? payload.text : "";
+  if (!msgs && !single.trim()) return [400, { error: AI_NOTHING_ERROR }];
+  if (!providerSet()) return [200, { text: AI_AGENT_OFFLINE, source: "heuristic" }];
+
+  const tools = payload && Array.isArray(payload.tools)
+    ? payload.tools.filter((t) => typeof t === "string" || typeof t === "number")
+        .map((t) => String(t))
+    : [];
+  const ctx = payload && typeof payload.context === "string" ? payload.context : "";
+  const lines = (msgs || [{ role: "user", content: single }]).slice(-12).map((m) =>
+    String((m && m.role) || "user") + ": " + String((m && m.content) || "").slice(0, 2000));
+  const parts = ["Tools you may use:\n" + tools.join("\n")];
+  if (ctx.trim()) parts.push("What you already know:\n" + ctx.slice(0, 4000));
+  parts.push("Conversation:\n" + lines.join("\n"));
+  parts.push("Reply with the JSON object now.");
+  const text = await aiChat(parts.join("\n\n"), null, AI_PROMPT_AGENT);
+  if (text === null) return [200, { text: AI_AGENT_DOWN, source: "" }];
+  return [200, { text, source: "model" }];
 }
 
 async function aiExtract(payload) {
@@ -1296,6 +1331,8 @@ function route(method, path, qs, body) {
     return aiInstruct(body).then((r) => ({ status: r[0], body: r[1] }));
   if (path === "/api/ai/statement" && method === "POST")
     return aiStatement(body).then((r) => ({ status: r[0], body: r[1] }));
+  if (path === "/api/ai/chat" && method === "POST")
+    return aiAgent(body).then((r) => ({ status: r[0], body: r[1] }));
 
   return { status: 404, body: { error: "not found" } };
 }

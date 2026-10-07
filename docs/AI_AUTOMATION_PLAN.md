@@ -1,6 +1,7 @@
 # PW Budget — Project Summary & AI / Automation Plan
 
-> Status: **phases 1–3 implemented, phases 4–5 not yet started.** This
+> Status: **phases 1–3 + Phase 0 + the assistant v2 (agentic) pass
+> implemented, phases 4–5 not yet started.** This
 > document records what the project is today, and what we decided the
 > AI/automation layer should be.
 > 2026-10-04 — capture pipeline, statement ingest, knowledge base, income
@@ -28,6 +29,27 @@
 > three statement/instruct prompts were hoisted to shared constants — the
 > audit's model contract check now compares **9** strings, not 6. Parity 79
 > steps; 160 audit + 148 smoke assertions.
+> **2026-10-07 — assistant v2 (the agentic pass)** landed: the chat assistant
+> now knows its own limits (coverage-off tools are described to the model as
+> `[locked]`, never hidden), retries a failed model call once and offers
+> *Try again*, briefs the owner on open, suggests follow-ups, and gained four
+> **approve-gated** write powers (`propose_coverage`, `import_slip` → one card
+> per line, `backup_books` → file card, **Approve all** for a batch) plus
+> month/year/branch-scoped reports. `AI_PROMPT_AGENT` became a shared
+> constant (contract now **12** strings); `CACHE = "pwbudget-v29"`.
+> Also 2026-10-07 — **provider presets extended** after a platform research
+> pass (Claude / Gemini / DeepSeek / ChatGPT): **DeepSeek** joined the picker
+> as the cheap pay-per-use option (OpenAI-compatible base, vision ids from its
+> own pricing docs, CORS preflight measured 200 from this app's origin), and
+> OpenRouter's datalist gained `anthropic/claude-haiku-4.5` (verified against
+> its live model list). Claude and OpenAI as *direct* presets were deliberately
+> skipped: no free tier for either, a direct Claude preset needs a second wire
+> format in both engines, and OpenAI's browser CORS is flaky.
+> Also 2026-10-07 — **`agentParse` hardened**: a model reply with a stray
+> closing brace, prose around the object, or a cut-off tail no longer swallows
+> its `actions` (this is exactly how one real approved purchase never became
+> a card — see SESSION_STATUS §3.7).
+> Tests now: 173 audit + 229 smoke, 0 failed.
 
 ---
 
@@ -94,14 +116,14 @@ budgets          year + month + total + savings target + item allocations (%)
 - Budget: `spendable = total − save`; ⚡ auto-distribute weights the top 6
   items from the prior 6 months, drift-corrected to exactly 100%.
 
-### Tests (baseline verified green on 2026-10-05)
+### Tests (baseline verified green on 2026-10-07)
 
 ```
-node audit_calculations.js   → 160 passed, 0 failed
-                               (calculator, 79-step offline↔server parity —
+node audit_calculations.js   → 173 passed, 0 failed
+                               (calculator, offline↔server parity —
                                including /api/ai/* —, invariants, fixture replay,
-                               9 shared model constants)
-node smoke_test.js           → 165 passed, 0 failed  — needs a server on :8123
+                               12 shared model constants incl. AI_PROMPT_AGENT)
+node smoke_test.js           → 229 passed, 0 failed  — needs a server on :8123
                                (run `python server.py 8123` first; it does NOT spawn one)
 python tools/cleanup_smoke.py  → wipes smoke rows from ledger.db afterwards
 ```
@@ -293,6 +315,7 @@ regression suite. Nothing built meanwhile is thrown away.
 | 2b | AI-native surface: connection, status, coverage | ✅ **done 2026-10-04** — **AI connection** dialog (provider select: Groq / Gemini / OpenRouter / custom OpenAI-compatible, key + model, *Test connection*, *Forget*), key in `localStorage["pwbudget.ai.v1"]` and never sent anywhere but the provider; **AI status strip** on every screen (`on` / `off` / `bad` + coverage); **coverage** matrix — `capture` gates the scan bar, `catalogue` + `money` gate what context travels with a scan (`payload.context`, mirrored in both engines), `app` gates the instruction box driving `/api/ai/instruct`. Model plumbing moved into `db.js` (`setProvider`/`aiChat`/`aiCall`) mirroring `server.py`'s env config, with an added audit section comparing the 6 shared prompt/error constants. 132 smoke + 157 audit assertions |
 | 3 | Income side + statement/slip ingest | ✅ **done 2026-10-04** — `income` table (`date, branch_id, source, reference, amount, memo`) with `GET/POST /api/income` + `DELETE /api/income/{id}` in both engines; **Money in** view (list, search, month filter, pager, delete, ＋ Money in dialog); analytics gains `series[].income`, `totals.income` / `totals.net`; dashboard gains a *Money in this month* KPI and a money-in series in the spend chart; `/api/meta` `months` now unions purchases **and** income. **Statement ingest** card: paste / 📂 CSV / 📷 screenshot → `POST /api/ai/statement` → candidates with a *read by …* source line, `uncertain[]` as a warning, money-in rows ticked by default and *Record money in* looping `POST /api/income`; money-out rows are shown, tick-disabled and labelled "record it as a purchase instead". Gated by the existing `capture` coverage area (no 5th area, so the settings matrix still ships 4). `db.js`'s `aiInstruct`/`aiStatement` gained the same model path as `server.py`, all three AI routes are now Promises offline, and the 3 statement/instruct prompts were hoisted into shared constants (contract check: 6 → **9**). 148 smoke + 160 audit assertions |
 | 0 | **Your data**: loud storage failures + backup / restore / CSV export | ✅ **done 2026-10-05** — `db.js`'s `save()` no longer swallows quota errors: `request()` snapshots the store and, if the write did not stick, rolls back and answers **507** with a shared sentence (`server.py` answers 507 too when sqlite reports a full/read-only disk — probed for real with `attrib +R ledger.db`). Persistent red storage banner until a save succeeds. **Your data** dialog: one-file backup in the offline engine's own shape (assembled through the API in server mode), **additive restore** replayed through the ordinary create paths (never deletes, idempotent — no new endpoints to mirror), and purchases/credits/money-in CSV export with BOM. Read fan-out batched to 4: a 72-way parallel burst was enough to get a connection refused and silently downgrade the app to offline for the rest of the session. 165 smoke + 160 audit assertions |
+| A–D | **Assistant v2 (agentic)**: honest capability reporting + retry, richer reads, briefing & follow-ups, approve-gated write powers | ✅ **done 2026-10-07** — 24 tools; coverage-off tools described as `[locked]` (never hidden), `AI_PROMPT_AGENT` says so and became a shared contract string (**12**); `agentTurn` retries once, a dead turn renders *Try again*; keyless **briefing** on open + `agentFollowups` chips; new reads (`get_purchase`, `compare_months`, `get_reminders`, `price_trend`, `top_suppliers`, `navigate`, `search_income`, `budget_health`); write powers still behind Approve: `propose_coverage` (free tool, flips a coverage switch), `import_slip` (one card per line), `backup_books` (file card), **Approve all**; reports take `{month, year, branch_id}`; `CACHE = "pwbudget-v29"`; 229 smoke + 173 audit assertions |
 | 4 | Knowledge base: `documents`/`references`, `/api/search`, then chat | Worthless until phases 2–3 have produced data |
 | 5 | Builder | Riskiest surface, least valuable for this audience |
 
