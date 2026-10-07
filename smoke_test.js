@@ -154,7 +154,12 @@ module.exports = {
   zipStore, crc32, renderJournal, openJournal,
 };
 `);
-  return require(tmp);
+  const pw = require(tmp);
+  const vsrc = fs.readFileSync(path.join(__dirname, "public", "app", "voice.js"), "utf8");
+  const vtmp = path.join(__dirname, `_voice_${mode}.js`);
+  fs.writeFileSync(vtmp, vsrc + "\nmodule.exports = window.VoiceOverlay;\n");
+  pw.VoiceOverlay = require(vtmp);
+  return pw;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -737,6 +742,125 @@ async function runMode(mode) {
       r.actions[0].tool === "create_purchase" && r.actions[0].args.product === "Ban";
   });
 
+  // ---- voice overlay ----
+  await check(mode + ": voice hears numbers in every shipped language", () => {
+    const N = pw.VoiceOverlay.parseNumbers;
+    return N("add five hundred and fifty for food", "en")[0] === 550 &&
+      N("two hundred", "en")[0] === 200 &&
+      N("a thousand", "en")[0] === 1000 &&
+      N("ɔha anum", "tw")[0] === 500 &&
+      N("ɔha ne enum", "tw")[0] === 105 &&
+      N("ahanum", "tw")[0] === 500 &&
+      N("oha kɛ ekome", "ga")[0] === 101 &&
+      N("ohai enumɔ", "ga")[0] === 500 &&
+      N("nyɔŋmai enyɔ", "ga")[0] === 20 &&
+      N("alafa ɖeka kple ɖeka", "ee")[0] === 101 &&
+      N("blaeve", "ee")[0] === 20 &&
+      N("akpe ewo", "ee")[0] === 10000 &&
+      N("ɗari biyu", "ha")[0] === 200 &&
+      N("ɗari da tamanin", "ha")[0] === 180 &&
+      N("dubu biyar", "ha")[0] === 5000 &&
+      N("goma sha biyu", "ha")[0] === 12 &&
+      N("quatre-vingt-dix", "fr")[0] === 90 &&
+      N("soixante et onze", "fr")[0] === 71 &&
+      N("trois cents cinquante", "fr")[0] === 350 &&
+      N("vingt et un", "fr")[0] === 21;
+  });
+
+  await check(mode + ": voice reads digits, separators and decimals", () => {
+    const N = pw.VoiceOverlay.parseNumbers;
+    return N("GHS 1,200 for rent", "en")[0] === 1200 &&
+      N("set aside 500.50", "en")[0] === 500.5 &&
+      N("500 cedis", "en")[0] === 500;
+  });
+
+  await check(mode + ": the voice reply parser survives a stray brace", () => {
+    const P = pw.VoiceOverlay.parseReply;
+    const r = P('{"reply":"Added transport.","actions":[{"op":"add_item","name":"transport","amount":500}]}}');
+    const p = P('Sure! {"reply":"Done.","actions":[{"op":"add_note","text":"ok"}]} ok?');
+    return r.reply === "Added transport." && r.actions.length === 1 &&
+      r.actions[0].op === "add_item" && r.actions[0].amount === 500 &&
+      p.reply === "Done." && p.actions.length === 1 && p.actions[0].op === "add_note";
+  });
+
+  await check(mode + ": a cut-off voice reply keeps what it had and drops junk ops", () => {
+    const P = pw.VoiceOverlay.parseReply;
+    const t = P('{"reply":"Done","actions":[{"op":"add_item","name":"ba');
+    const u = P('{"reply":"ok","actions":[{"op":"make_coffee","x":1},{"op":"delete_item","name":"fuel"}]}');
+    return t.reply === "Done" && t.actions.length === 1 &&
+      t.actions[0].op === "add_item" && t.actions[0].name === "ba" &&
+      u.actions.length === 1 && u.actions[0].op === "delete_item";
+  });
+
+  await check(mode + ": voice batches may only contain what was said", () => {
+    const V = pw.VoiceOverlay.validateBatch;
+    const rows = [{ name: "Transport" }, { name: "Food" }];
+    const ok = V([{ op: "add_item", name: "transport", amount: 500 }], [500], { rows });
+    const invented = V([{ op: "add_item", name: "x", amount: 450 }], [500], { rows });
+    const missing = V([{ op: "update_item", name: "Rocket", amount: 500 }], [500], { rows });
+    const renamed = V([{ op: "update_item", name: "transport", amount: 500 }], [500], { rows });
+    const ask = V([{ op: "ask_clarification", question: "How much?" },
+      { op: "add_item", name: "x", amount: 500 }], [500], { rows });
+    const many = V(Array.from({ length: 7 }, () => ({ op: "add_note", text: "n" })), [], { rows });
+    return ok.ok && ok.actions.length === 1 &&
+      !invented.ok && /not spoken/.test(invented.issues.join(" ")) &&
+      !missing.ok && /no item/.test(missing.issues.join(" ")) &&
+      renamed.ok && ask.ok && ask.actions.length === 1 &&
+      ask.actions[0].op === "ask_clarification" && !many.ok;
+  });
+
+  await check(mode + ": a voice chip says exactly what would change", () => {
+    const V = pw.VoiceOverlay;
+    V.renderChips([{ op: "add_item", name: "transport", amount: 500 }]);
+    const html = byId("voice-chips").innerHTML;
+    V.renderChips([]);
+    return html.includes("transport") && html.includes("500") &&
+      html.includes("disabled") && byId("voice-chips").innerHTML === "";
+  });
+
+  await check(mode + ": the voice panel opens on its hotkey and closes on Esc", () => {
+    const V = pw.VoiceOverlay;
+    V.close();
+    const t = V.hotkey({ key: " ", ctrlKey: true, shiftKey: true, preventDefault() {} });
+    const opened = V.isOpen() && byId("voice-panel").classList.contains("open") &&
+      byId("voice-fab").classList.contains("active");
+    let stopped = false;
+    const e = V.hotkey({ key: "Escape", stopPropagation() { stopped = true; } });
+    const closed = !V.isOpen() && !byId("voice-panel").classList.contains("open") && stopped;
+    const again = V.hotkey({ key: " ", ctrlKey: true, shiftKey: true, preventDefault() {} });
+    byId("voice-fab").dispatch("click");
+    return t && opened && e && closed && again && !V.isOpen();
+  });
+
+  await check(mode + ": the voice language is remembered", () => {
+    const V = pw.VoiceOverlay;
+    V.setLang("tw");
+    const saved = JSON.parse(localStorage.getItem("pwbudget.voice.v1") || "{}");
+    const now = V.getLang();
+    const back = V.setLang("en");
+    const saved2 = JSON.parse(localStorage.getItem("pwbudget.voice.v1") || "{}");
+    return saved.lang === "tw" && now === "tw" &&
+      saved2.lang === "en" && back === "en";
+  });
+
+  await check(mode + ": typed text reaches the engine and comes back a reply", async () => {
+    const V = pw.VoiceOverlay;
+    V.open();
+    const out = await V.submit("what is my total budget?");
+    const reply = byId("voice-reply").textContent;
+    const tr = byId("voice-transcript").textContent;
+    const hist = V.state().history;
+    V.close();
+    return !!out && reply.length > 0 && tr === "what is my total budget?" &&
+      hist === 2 && byId("voice-chips").innerHTML === "";
+  });
+
+  await check(mode + ": an empty voice line just says so", async () => {
+    const V = pw.VoiceOverlay;
+    const r = await V.submit("   ");
+    return r === null && byId("voice-note").textContent === "Say or type something first.";
+  });
+
   await check(mode + ": a read tool answers without asking first", async () => {
     const out = await pw.agentRunTool(pw.AGENT_TOOL("overview"), {});
     const rep = await pw.agentRunTool(pw.AGENT_TOOL("list_changes"), {});
@@ -1208,6 +1332,7 @@ async function runMode(mode) {
   }
 
   fs.unlinkSync(path.join(__dirname, `_app_${mode}.js`));
+  fs.unlinkSync(path.join(__dirname, `_voice_${mode}.js`));
   return creditId;
 }
 

@@ -4920,3 +4920,12 @@ function initCalc() {
 }
 
 initCalc();
+
+window.PWApp = {
+  get state() { return state; },
+  get AGENT() { return AGENT; },
+  api, offlineRequest, toast, cur, esc, monthName,
+  switchView, aiAllows, aiConfigured,
+  snapshotBudget, renderBudgetBody, saveBudget, loadBudget,
+  refreshMeta, openAiDialog, agentJournal, saveAgent,
+};

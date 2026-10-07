@@ -8,6 +8,9 @@ ledger.db-shm
 _app_offline.js
 _app_server.js
 _app_*.js
+_voice_offline.js
+_voice_server.js
+_voice_*.js
 
 # ---- python ----
 __pycache__/

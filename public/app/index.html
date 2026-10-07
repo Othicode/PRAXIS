@@ -671,6 +671,28 @@ setTimeout(function () {
   <div class="calc-foot">works offline · keyboard supported</div>
 </div>
 
+<button class="voice-fab" id="voice-fab" aria-label="Open the voice assistant" title="Voice assistant (Ctrl+Shift+Space)">🎙</button>
+<div class="voice-panel" id="voice-panel" aria-hidden="true" aria-label="Voice assistant">
+  <header class="voice-head" id="voice-head">
+    <span class="voice-ico" aria-hidden="true">🎙</span>
+    <strong>Voice</strong>
+    <select id="voice-lang" class="voice-lang" aria-label="Language"></select>
+    <button class="icon-btn" id="voice-close" type="button" aria-label="Close voice assistant">✕</button>
+  </header>
+  <div class="voice-body">
+    <div class="voice-wave" id="voice-wave" hidden aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="voice-transcript" id="voice-transcript" aria-live="polite"></div>
+    <div class="voice-reply" id="voice-reply" aria-live="polite"></div>
+    <div class="voice-chips" id="voice-chips"></div>
+  </div>
+  <form class="voice-form" id="voice-form" autocomplete="off">
+    <button type="button" class="icon-btn voice-mic" id="voice-mic" aria-label="Speak" title="Speak">🎤</button>
+    <input type="text" id="voice-text" maxlength="500" placeholder="…or type what you want to change" aria-label="Type your request">
+    <button type="submit" class="voice-send" id="voice-send" aria-label="Send">➤</button>
+  </form>
+  <p class="voice-note" id="voice-note">say it or type it · nothing changes until it is checked</p>
+</div>
+
 <button class="update-banner hidden" id="update-banner" title="Reload to get the new version">⬆ <strong>New version available</strong> — tap to update</button>
 <!-- Storage failures used to be silent (db.js swallowed them). Now the app
      says so and offers the way out: a backup you can download first. -->
@@ -678,5 +700,6 @@ setTimeout(function () {
 <div class="toast" id="toast"></div>
 <script src="db.js"></script>
 <script src="app.js"></script>
+<script src="voice.js"></script>
 </body>
 </html>

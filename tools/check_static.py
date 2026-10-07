@@ -34,6 +34,7 @@ for p in [
     "/app/",
     "/app/index.html",
     "/app/app.js",
+    "/app/voice.js",
     "/app/db.js",
     "/app/styles.css",
     "/app/manifest.webmanifest",
