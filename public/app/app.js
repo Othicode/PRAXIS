@@ -3568,7 +3568,7 @@ function renderJournal() {
     return;
   }
   box.innerHTML = AGENT.journal.slice().reverse().map((j) => `
-    <div class="jrow${j.undone ? " undone" : ""}">
+    <div class="jrow${j.undone ? " undone" : ""}${j.tool === "voice" ? " voiced" : ""}">
       <div class="jrow-head">
         <span class="jrow-ts">${esc(j.ts)}</span>
         <b>${esc(j.label)}</b>
@@ -4927,5 +4927,5 @@ window.PWApp = {
   api, offlineRequest, toast, cur, esc, monthName,
   switchView, aiAllows, aiConfigured, aiBase,
   snapshotBudget, renderBudgetBody, saveBudget, loadBudget,
-  refreshMeta, openAiDialog, agentJournal, saveAgent,
+  refreshMeta, openAiDialog, agentJournal, saveAgent, renderJournal,
 };

@@ -849,7 +849,8 @@ async function runMode(mode) {
     const html = byId("voice-chips").innerHTML;
     V.renderChips([]);
     return html.includes("transport") && html.includes("500") &&
-      html.includes("disabled") && byId("voice-chips").innerHTML === "";
+      html.includes('data-vi="0"') && !html.includes("disabled") &&
+      byId("voice-chips").innerHTML === "";
   });
 
   await check(mode + ": the voice panel opens on its hotkey and closes on Esc", () => {
@@ -1001,6 +1002,146 @@ async function runMode(mode) {
     await V.submit("what is my total budget?");
     const silent = SPOKEN.length === 1;
     return startOff && on && spoke && silent && V.ttsOn() === false;
+  });
+
+  await check(mode + ": voice chips apply a change and one-step undo restores it", async () => {
+    const V = pw.VoiceOverlay;
+    const nm = "voicetest-" + mode;
+    const orig = {
+      t: Number(pw.state.budget.baseTotal) || 0,
+      s: Number(pw.state.budget.baseSave) || 0,
+      rows: JSON.stringify(pw.state.budget.rows || []),
+    };
+    const chips = () => byId("voice-chips").innerHTML;
+    const click = (vi) => byId("voice-chips").dispatch("click", { target: { dataset: { vi } } });
+    const row = () => (pw.state.budget.rows || []).find((r) => r.name === nm);
+    const realConfirm = global.confirm;
+    let confirms = 0;
+    global.confirm = () => { confirms++; return true; };
+    pw.setAiArea("app", true);
+    try {
+      V.renderChips([{ op: "set_total", amount: 1000, save: 0, confirm: false }], [1000]);
+      click("0");
+      await sleep(80);
+      const step1 = pw.state.budget.baseTotal === 1000 && chips().includes("disabled");
+
+      V.renderChips([{ op: "add_item", name: nm, amount: 500 }], [500]);
+      click("0");
+      await sleep(80);
+      const step2 = !!row() && Math.abs(Number(row().percent) - 50) < 0.01;
+
+      V.renderChips([{ op: "update_item", name: nm, amount: 250 }], [250]);
+      click("0");
+      await sleep(80);
+      const step3 = !!row() && Math.abs(Number(row().percent) - 25) < 0.01;
+
+      V.renderChips([{ op: "delete_item", name: nm, confirm: false }], []);
+      click("0");
+      await sleep(80);
+      const step4 = !row();
+
+      click("undo");
+      await sleep(80);
+      const step5 = !!row() && Math.abs(Number(row().percent) - 25) < 0.01 &&
+        !chips().includes('data-vi="undo"');
+
+      V.renderChips([{ op: "delete_item", name: nm, confirm: false }], []);
+      click("0");
+      await sleep(80);
+      const step6 = !row();
+
+      V.renderChips([{ op: "set_total", amount: orig.t, save: orig.s, confirm: false }], [orig.t]);
+      click("0");
+      await sleep(80);
+      const back = pw.state.budget.baseTotal === orig.t &&
+        pw.state.budget.baseSave === orig.s &&
+        JSON.stringify(pw.state.budget.rows || []) === orig.rows;
+      return step1 && step2 && step3 && step4 && step5 && step6 && back &&
+        confirms === 4;
+    } finally {
+      global.confirm = realConfirm;
+      pw.setAiArea("app", false);
+    }
+  });
+
+  await check(mode + ": the coverage gate decides whether a chip can apply", async () => {
+    const V = pw.VoiceOverlay;
+    const t0 = Number(pw.state.budget.baseTotal) || 0;
+    const s0 = Number(pw.state.budget.baseSave) || 0;
+    const chips = () => byId("voice-chips").innerHTML;
+    const click = (vi) => byId("voice-chips").dispatch("click", { target: { dataset: { vi } } });
+    V.renderChips([{ op: "set_total", amount: 1200, save: 0, confirm: false }], [1200]);
+    click("0");
+    await sleep(60);
+    const blocked = pw.state.budget.baseTotal === t0 &&
+      /coverage/i.test(byId("voice-note").textContent) &&
+      !chips().includes("disabled");
+    pw.setAiArea("app", true);
+    click("0");
+    await sleep(80);
+    const opened = pw.state.budget.baseTotal === 1200 && chips().includes("disabled");
+    V.renderChips([{ op: "set_total", amount: t0, save: s0, confirm: false }], [t0]);
+    click("0");
+    await sleep(80);
+    const back = pw.state.budget.baseTotal === t0 && pw.state.budget.baseSave === s0;
+    pw.setAiArea("app", false);
+    return blocked && opened && back;
+  });
+
+  await check(mode + ": a declined confirmation changes nothing", async () => {
+    const V = pw.VoiceOverlay;
+    const t0 = Number(pw.state.budget.baseTotal) || 0;
+    const before = JSON.stringify(pw.state.budget.rows || []);
+    const realConfirm = global.confirm;
+    global.confirm = () => false;
+    pw.setAiArea("app", true);
+    try {
+      V.renderChips([{ op: "set_total", amount: 777, save: 1, confirm: false }], [777]);
+      byId("voice-chips").dispatch("click", { target: { dataset: { vi: "0" } } });
+      await sleep(60);
+      return pw.state.budget.baseTotal === t0 &&
+        JSON.stringify(pw.state.budget.rows || []) === before &&
+        /declined/i.test(byId("voice-note").textContent) &&
+        !byId("voice-chips").innerHTML.includes("disabled");
+    } finally {
+      global.confirm = realConfirm;
+      pw.setAiArea("app", false);
+    }
+  });
+
+  await check(mode + ": a chip can only carry what was really said", async () => {
+    const V = pw.VoiceOverlay;
+    pw.setAiArea("app", true);
+    V.renderChips([{ op: "add_item", name: "ghost", amount: 450 }], [500]);
+    byId("voice-chips").dispatch("click", { target: { dataset: { vi: "0" } } });
+    await sleep(60);
+    const refused = /not spoken/i.test(byId("voice-note").textContent) &&
+      !(pw.state.budget.rows || []).some((r) => r.name === "ghost") &&
+      !byId("voice-chips").innerHTML.includes("disabled");
+    const noteNow = byId("voice-note").textContent;
+    V.renderChips([{ op: "ask_clarification", question: "How much for rent?" }], [500]);
+    byId("voice-chips").dispatch("click", { target: { dataset: { vi: "0" } } });
+    await sleep(40);
+    const ask = V.state().pending === 1 &&
+      !byId("voice-chips").innerHTML.includes("disabled") &&
+      byId("voice-note").textContent === noteNow;
+    pw.setAiArea("app", false);
+    return refused && ask;
+  });
+
+  await check(mode + ": a voice note lands in the change log", async () => {
+    const V = pw.VoiceOverlay;
+    const n0 = pw.AGENT.journal.length;
+    pw.setAiArea("app", true);
+    V.renderChips([{ op: "add_note", text: "Call the landlord about rent" }], []);
+    byId("voice-chips").dispatch("click", { target: { dataset: { vi: "0" } } });
+    await sleep(60);
+    const j = pw.AGENT.journal[pw.AGENT.journal.length - 1];
+    const list = byId("journal-list").innerHTML;
+    pw.setAiArea("app", false);
+    return pw.AGENT.journal.length === n0 + 1 && !!j && j.tool === "voice" &&
+      String(j.detail).includes("landlord") &&
+      list.includes("landlord") && list.includes("voiced");
   });
 
   await check(mode + ": a read tool answers without asking first", async () => {

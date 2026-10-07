@@ -146,6 +146,13 @@
       micDenied: "The microphone was refused — allow it in your browser, or type instead.",
       listening: "Listening…",
       recording: "Recording — tap the microphone again when you are done.",
+      applied: "Applied — tap ↩ Undo if that was wrong.",
+      undone: "Brought back — the budget is as it was.",
+      gate: "That change needs the App settings coverage — turn it on under Settings › AI.",
+      cant: "I cannot apply that —",
+      declined: "Nothing changed — you declined.",
+      needTotal: "Set a total budget first, then ask me again.",
+      undoLabel: "Undo",
     },
     fr: {
       think: "Réflexion…",
@@ -157,6 +164,13 @@
       micDenied: "Le micro a été refusé — autorisez-le dans le navigateur, ou écrivez.",
       listening: "À l'écoute…",
       recording: "Enregistrement — touchez le micro encore quand vous avez fini.",
+      applied: "Appliqué — touchez ↩ Annuler si c'était une erreur.",
+      undone: "Restauré — le budget est comme avant.",
+      gate: "Ce changement demande la couverture Paramètres › Application — activez-la dans Paramètres › IA.",
+      cant: "Je ne peux pas appliquer —",
+      declined: "Rien n'a changé — vous avez refusé.",
+      needTotal: "Définissez d'abord un budget total, puis redemandez.",
+      undoLabel: "Annuler",
     },
   };
 
@@ -164,6 +178,7 @@
     open: false, inited: false, asking: false,
     lang: "en", tts: false, wake: false,
     history: [], pending: [], transcript: "", reply: "",
+    amounts: [], undo: null,
     mic: null, sr: null, rec: null, consentPending: false,
     whisperCancel: false, micError: "",
   };
@@ -478,13 +493,19 @@
     return String(a.op || "");
   }
 
-  function voiceRenderChips(actions) {
+  function voiceRenderChips(actions, amounts) {
     VOICE.pending = Array.isArray(actions) ? actions : [];
+    if (Array.isArray(amounts))
+      VOICE.amounts = amounts.map(Number).filter((n) => Number.isFinite(n));
     const c = $("#voice-chips");
     if (!c) return;
-    c.innerHTML = VOICE.pending.map((a, i) =>
-      `<button type="button" class="voice-chip" data-vi="${i}" disabled>${h(voiceChipLabel(a))}</button>`
-    ).join("");
+    const chips = VOICE.pending.map((a, i) => {
+      const done = !!(a && a._done);
+      return `<button type="button" class="voice-chip${done ? " applied" : ""}" data-vi="${i}"${done ? " disabled" : ""}>${h((done ? "✓ " : "") + voiceChipLabel(a))}</button>`;
+    });
+    if (VOICE.undo)
+      chips.push(`<button type="button" class="voice-chip voice-undo" data-vi="undo">↩ ${h(str("undoLabel"))}</button>`);
+    c.innerHTML = chips.join("");
   }
 
   function voiceOpen() {
@@ -601,13 +622,110 @@
       if (VOICE.history.length > 12) VOICE.history = VOICE.history.slice(-12);
       VOICE.reply = last.reply;
       renderReply(last.reply);
-      voiceRenderChips(last.actions);
+      voiceRenderChips(last.actions, amounts);
       setStatus(str("idle"));
       voiceSpeak(last.reply);
       return last;
     } finally {
       VOICE.asking = false;
     }
+  }
+
+  async function voiceApply(i) {
+    const A = voiceApp();
+    const a = VOICE.pending[i];
+    if (!A || !a || a._done) return false;
+    if (a.op === "ask_clarification") {
+      const box = $("#voice-text");
+      if (box && box.focus) box.focus();
+      return false;
+    }
+    if (!A.aiAllows("app")) { setStatus(str("gate")); return false; }
+    const snap = A.snapshotBudget() || {};
+    const rows = Array.isArray(snap.allocations) ? snap.allocations : [];
+    const res = voiceValidateBatch([a], VOICE.amounts, { rows });
+    if (!res.ok) { setStatus(str("cant") + " " + res.issues.join("; ")); return false; }
+    const act = res.actions[0];
+    if (act.op === "delete_item" || act.op === "set_total") {
+      const msg = act.op === "delete_item"
+        ? "Remove \u201C" + act.name + "\u201D from this month's budget?"
+        : "Set the total budget to " + A.cur(Number(act.amount)) + "?";
+      if (typeof confirm === "function" && !confirm(msg)) {
+        setStatus(str("declined"));
+        return false;
+      }
+    }
+    const total = Number(snap.total_amount) || 0;
+    const save = Number(snap.save_amount) || 0;
+    const before = { total, save, rows: JSON.parse(JSON.stringify(rows)) };
+    const spendable = Math.max(total - save, 0);
+    if (act.op === "add_item" || act.op === "update_item") {
+      if (spendable <= 0) { setStatus(str("needTotal")); return false; }
+      const pct = Math.round((Number(act.amount) / spendable) * 10000) / 100;
+      const n = voiceNorm(act.name);
+      const hit = rows.find((r) => voiceNorm(r && r.name) === n);
+      if (hit) hit.percent = pct;
+      else rows.push({ name: String(act.name), percent: pct, actual: 0 });
+    } else if (act.op === "delete_item") {
+      const n = voiceNorm(act.name);
+      let idx = rows.findIndex((r) => voiceNorm(r && r.name) === n);
+      if (idx < 0) idx = rows.findIndex((r) => {
+        const rn = voiceNorm(r && r.name);
+        return rn.includes(n) || n.includes(rn);
+      });
+      if (idx >= 0) rows.splice(idx, 1);
+    } else if (act.op === "set_total") {
+      A.state.budget.baseTotal = Number(act.amount);
+      if (Number.isFinite(Number(act.save))) A.state.budget.baseSave = Number(act.save);
+    }
+    a._done = true;
+    if (act.op !== "add_note") {
+      VOICE.undo = { rows: before.rows, total: before.total, save: before.save };
+      A.renderBudgetBody(A.snapshotBudget());
+      await A.saveBudget();
+    }
+    const after = {
+      total: Number(A.state.budget.baseTotal) || 0,
+      save: Number(A.state.budget.baseSave) || 0,
+      rows: rows.map((r) => [r.name, Number(r.percent) || 0]),
+    };
+    A.agentJournal("voice", voiceChipLabel(a),
+      act.op === "add_note" ? String(act.text)
+        : `total ${after.total} · save ${after.save} · ${after.rows.length} allocations`,
+      act.op === "add_note"
+        ? { before: null, after: { text: String(act.text) }, inverse: null }
+        : { before: { total: before.total, save: before.save,
+                      rows: before.rows.map((r) => [r.name, Number(r.percent) || 0]) },
+            after, inverse: null });
+    A.renderJournal();
+    voiceRenderChips(VOICE.pending);
+    setStatus(str("applied"));
+    return true;
+  }
+
+  async function voiceUndo() {
+    const A = voiceApp();
+    const u = VOICE.undo;
+    if (!A || !u) return false;
+    if (!A.aiAllows("app")) { setStatus(str("gate")); return false; }
+    const snap = A.snapshotBudget() || {};
+    A.state.budget.rows = u.rows;
+    A.state.budget.baseTotal = u.total;
+    A.state.budget.baseSave = u.save;
+    VOICE.undo = null;
+    A.renderBudgetBody(A.snapshotBudget());
+    await A.saveBudget();
+    A.agentJournal("voice", "\u21A9 " + str("undoLabel"),
+      `total ${u.total} · save ${u.save} · ${u.rows.length} allocations`,
+      { before: { total: Number(snap.total_amount) || 0, save: Number(snap.save_amount) || 0,
+                  rows: (snap.allocations || []).map((r) => [r.name, Number(r.percent) || 0]) },
+        after: { total: u.total, save: u.save,
+                 rows: u.rows.map((r) => [r.name, Number(r.percent) || 0]) },
+        inverse: null });
+    A.renderJournal();
+    voiceRenderChips(VOICE.pending);
+    setStatus(str("undone"));
+    return true;
   }
 
   function voiceApp() {
@@ -921,7 +1039,13 @@
       voiceAsk(v);
     });
     const chips = $("#voice-chips");
-    if (chips) chips.addEventListener("click", () => { /* applied in the next step */ });
+    if (chips) chips.addEventListener("click", (e) => {
+      const t = e && e.target ? e.target : null;
+      const vi = t && t.dataset ? t.dataset.vi : null;
+      if (vi == null || vi === "") return;
+      if (String(vi) === "undo") { voiceUndo(); return; }
+      voiceApply(Number(vi));
+    });
     if (typeof document.addEventListener === "function")
       document.addEventListener("keydown", voiceHotkey, true);
     voiceDrag();
@@ -951,6 +1075,8 @@
     setStatus,
     renderChips: voiceRenderChips,
     chipLabel: voiceChipLabel,
+    apply: voiceApply,
+    undo: voiceUndo,
     state: () => ({
       open: VOICE.open, asking: VOICE.asking, lang: VOICE.lang,
       pending: VOICE.pending.length, history: VOICE.history.length,
