@@ -70,6 +70,18 @@ contract, so nothing in the UI changes.
   an **Approve** tap (or **Approve all** for a batch); nothing is written by
   itself, and a model that cannot be reached says so with **Try again**
   instead of going quiet.
+- **🎤 Speak to the app** — a floating microphone (bottom-left, or
+  Ctrl+Shift+Space) opens a **voice overlay**: say or type a budget change in
+  **English, Français, Twi, Ga, Ewe or Hausa**, get a plain reply plus
+  **tap-to-apply chips** (`＋ transport · GH₵500`) for the month you are
+  looking at. Nothing applies until you tap: every amount must be one you
+  actually said, deleting or setting the total asks first, and one **↩ Undo**
+  chip reverts the last change. The microphone is consent-gated and audio is
+  never stored — with a Groq/OpenAI key attached it records in memory and
+  posts straight to `/api/ai/transcribe` (your provider's Whisper), otherwise
+  the browser's own Web Speech dictation listens; the 🔊 button reads replies
+  aloud, and every applied change is written to the assistant's change log.
+  The same **App settings** coverage switch decides what it may touch.
 - **Credits** — outstanding accounts with balance + %-settled progress and
   payment history; "Pay now" records later payments and recomputes everything.
   Each open credit shows how **old** it is (⏳ 60+ days = overdue) and an
@@ -281,6 +293,45 @@ deterministic rules a keyless server runs, and the strip turns red to say so.
 In the assistant a failed turn retries once, then offers **Try again** rather
 than leaving a dead thread.
 
+## Speaking to the app — the voice overlay
+
+The 🎤 button (bottom-left; **Ctrl+Shift+Space** anywhere) opens the overlay.
+Type or talk; the reply arrives as **chips you tap to apply** — nothing is
+written by itself, and only to the year/month the budget view is showing.
+
+- **Which engine hears you** is picked automatically: a Groq/OpenAI key
+  attached *and* a microphone → push-to-talk recording (in memory only, sent
+  to `/api/ai/transcribe`, i.e. your own provider's Whisper — `whisper-1`, or
+  `whisper-large-v3-turbo` on Groq); otherwise the browser's **Web Speech**
+  dictation (live, keyless); neither → the panel says so and typing still
+  works. The first microphone tap only asks for consent (remembered in
+  `pwbudget.voice.mic.v1`); a refused permission falls back to typing.
+- **What it may change** obeys the *App settings* coverage switch: every tap
+  checks it, and if it is off the overlay tells you and offers the settings
+  dialog. Chips carry only amounts that were really spoken (the model cannot
+  invent a number), `delete` and *set the total* confirm before touching
+  anything, notes go to the change log, and **↩ Undo** reverts the last
+  applied change in one step.
+- **Adding a language**: the number/word parser is a per-language lexicon in
+  `public/app/voice.js` (`VOICE_LEX` — en, fr, tw, ga, ee, ha). To add one,
+  give it a lexicon + label in `VOICE_LANGS`. All six languages understand
+  each other's digits, but the overlay's own **chrome** (buttons, hints,
+  consent lines) ships in English and French only — the other four fall back
+  to English text.
+- **Swapping the STT backend**: `voiceSttProvider()` in `voice.js` is the one
+  decision point — `whisper` (record → `/api/ai/transcribe`) or `webspeech`
+  (live browser recognition). A different provider only needs its
+  `/audio/transcriptions` endpoint to keep the same
+  `{audio, mime, lang}` shape the parity tests pin.
+- **Wake word ("Hey Budget") is dormant by design** — an always-on listener
+  costs battery and a permission the app never asks for. Nothing listens
+  until the microphone is tapped. Audio is transient like every image in
+  this app: recorded in memory, transcribed, dropped.
+- Known limits: live Web Speech truly transcribes **en/fr** — the other four
+  languages need the Whisper path (a key), and neither backend has been
+  exercised against a *real* live key in these sessions (the headless tests
+  cover the consent flow, backend selection, and route contract).
+
 ## Your data — backup, restore, export
 
 Open **More → Your data** (or the identity chip → *Your data*). One dialog:
@@ -329,7 +380,15 @@ chips, a failed turn offering *Try again*, one pasted slip expanding into one
 pending card per line, a requested backup arriving as a file, **Approve all**
 recording several rows in one tap, the history cap keeping a waiting card,
 the new read tools answering, `navigate` opening a view, a month-scoped
-report, and the harness's own exports — then **Your data**: the backup file's
+report, and the harness's own exports — then the **voice overlay**: the
+multilingual number engine and strict batch validator, a chip applying a
+budget change (set total → add → update → delete) with one-step *↩ Undo*
+back to where it started, the coverage gate blocking and then releasing the
+same tap, a declined confirmation changing nothing, an amount that was never
+spoken being refused at apply time, a voice note landing in the change log,
+the consent-gated microphone choosing its backend, a recognized/transcribed
+line reaching the engine, and the `/api/ai/voice` + `/api/ai/transcribe`
+routes answering keyless — then **Your data**: the backup file's
 table coverage, each CSV's
 header and first row, a restore putting a deleted purchase back and nothing
 else, and (offline only) a full store answering `507` with the purchase rolled
@@ -353,8 +412,9 @@ Answers *"is the arithmetic actually right?"* in five sections:
    figures and error strings. Opaque row ids are ignored (the engines ship
    different seed catalogs by design); everything else must match, because a
    user should see the same numbers online and offline. This now includes the
-   `/api/ai/*` extraction routes — the spawned server has `AI_API_KEY`
-   cleared, so a live model can never mask a heuristic divergence.
+   `/api/ai/*` routes — extraction, voice and transcribe — and the spawned
+   server has `AI_API_KEY` cleared, so a live model can never mask a heuristic
+   divergence.
 3. **Invariants** — arithmetic that must hold whatever the engine: credit
    `paid + balance == total`, `qty × unit_price == total`, every analytics
    breakdown summing to its total, `spendable == total - save`, allocation
@@ -363,10 +423,10 @@ Answers *"is the arithmetic actually right?"* in five sections:
 4. **Recorded-fixture replay** — a second server started against `fixtures/ai`
    must answer a recorded request with `source: "fixture"`, an unrecorded one
    with `source: "heuristic"`, and a bare image with a 400.
-5. **Shared model contract** — the twelve constants both engines ask the model
+5. **Shared model contract** — the thirteen constants both engines ask the model
    with (`AI_SYSTEM`, the capture image + text prompts, the instruct prompt,
    the two statement prompts, the assistant's prompt + its two fallback lines,
-   and the three AI error strings)
+   the voice prompt, and the three AI error strings)
    must be byte-identical in `server.py` and `public/app/db.js`; otherwise the
    same slip would yield different drafts online and offline.
 

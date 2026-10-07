@@ -2,11 +2,13 @@
 
 > **Read this first when starting a new session.** It is a snapshot of where
 > work stopped, what is green, and what is left. Last updated **2026-10-07**:
-> the **assistant v2 (agentic) rework** landed (see §3, "Assistant v2") and is
-> **not yet committed** — the working tree still carries it on top of the last
-> commit (`4efa62e`). Phase 0 landed earlier uncommitted too; Phases 1–3
-> committed as `aa6eb20`, docs as `bed9f32`, Google-first AI connection as
-> `caf607e`.
+> the **voice overlay** ("speak to the app") landed and is **committed** —
+> five green commits this cycle: `ba851c7` (assistant v2 + presets + parser
+> salvage, the pre-voice baseline), then `06db82c` (`/api/ai/voice`),
+> `3e29ce7` (overlay core), `fd0d951` (microphone/backends/transcribe) and
+> `d2cdec2` (apply/undo/gate). Working tree clean, all four test commands
+> green (§2). Earlier commits: `aa6eb20` (phases 1–3), `fb8c641` (Phase 0),
+> `caf607e` (Google-first AI connection), `4efa62e` (mobile UI).
 >
 > The product spec lives in `docs/AI_AUTOMATION_PLAN.md`; this file is only
 > about *state of the work*.
@@ -44,8 +46,8 @@ Constraints that are **not negotiable** (they break tests if violated):
 Run from the repo root:
 
 ```
-node smoke_test.js          -> 229 passed, 0 failed
-node audit_calculations.js  -> 173 passed, 0 failed (12 shared constants)
+node smoke_test.js          -> 275 passed, 0 failed
+node audit_calculations.js  -> 174 passed, 0 failed (13 shared constants)
 python tools/cleanup_smoke.py   -> clean (branches: Main Shop; purchases: 0)
 python tools/check_static.py    -> OK
 ```
@@ -160,7 +162,7 @@ the stub `El`, income cleanup loop.
 
 ---
 
-### Assistant v2 — the agentic pass ✅ (this session, **not yet committed**)
+### Assistant v2 — the agentic pass ✅ (committed in `ba851c7`)
 
 The chat assistant was reworked from a thin prompt wrapper into an agent that
 knows its own limits, speaks between turns, and offers a small set of
@@ -332,6 +334,60 @@ this is observable to them; the only proof that matters is a real handset.
 
 ---
 
+### Voice overlay — speak to the books ✅ (this session, `06db82c` → `d2cdec2`)
+
+The owner-approved voice plan, five small green commits:
+
+**1 — the route (`06db82c`).** `POST /api/ai/voice` in both engines behind the
+shared prompt `AI_PROMPT_VOICE` (**contract 12 → 13**): the model answers with
+exactly one JSON `{reply, actions}`, ≤6 *flat* actions from the whitelist
+`add_item | update_item | delete_item | set_total {amount, save} | add_note |
+ask_clarification`, destructive ops carry `confirm`. Three audit parity steps
+pin the route (empty line, bad key, history echo).
+
+**2 — the overlay (`3e29ce7`).** `public/app/voice.js` + panel markup/styles +
+the `window.PWApp` bridge (appended after `initCalc()`): draggable glass panel
+(mic fab bottom-left, Ctrl+Shift+Space hotkey, drag-to-move), the number
+engine — per-language lexicons **en/fr/tw/ga/ee/ha**, digit pass + word
+spans, connector/scale walk — `voiceParseReply` (salvages stray braces the
+way `agentParse` does), the strict validator (amounts must have been spoken,
+rows must exist for update/delete, ask-only replies carry no actions),
+history, chips, drag. Smoke harness grew `_voice_${mode}.js` loading +
+10 checks × 2 modes. Fixed on the way: the span builder excluded scale words
+("five hundred" parsed as 5), and a smoke lang check read the language after
+switching back.
+
+**3 — capture (`fd0d951`).** `voiceSttProvider()` picks the engine:
+Groq/OpenAI key + microphone → **whisper** (push-to-talk, `MediaRecorder` →
+b64 → `POST /api/ai/transcribe` — `whisper-large-v3-turbo` on Groq else
+`whisper-1`, 400 `AI_NOTHING_ERROR` without audio/provider, `source:""` when
+unreachable); else **webspeech** (live recognition, final result
+auto-submits); else typing with a plain hint. Consent is asked on the first
+tap (`pwbudget.voice.mic.v1`), audio is in-memory only; the 🔊 chip toggles
+TTS read-aloud. `_ai_transcribe()` in `server.py` + `aiTranscribe()` in
+`db.js` mirror byte-for-byte. 7 checks × 2 modes.
+
+**4 — apply/undo (`d2cdec2`).** Chips became tappable: re-validate against
+the amounts really spoken (`VOICE.amounts` travels with the batch), gate on
+`aiAllows("app")` first (localized hint, no dialog on refusal), confirm
+`delete_item`/`set_total`, convert the cedi amount to percent of spendable,
+`renderBudgetBody` + `saveBudget`, journal the change (voice rows get a gold
+rail via `.jrow.voiced`), and render **↩ Undo** — one-step restore of
+rows/total/save, re-save, reversal journal row. `add_note` writes the
+journal only; an `ask_clarification` chip refocuses the text box.
+`CACHE = "pwbudget-v32"`. 6 checks × 2 modes.
+
+**Tests** — smoke **265 → 275**, audit unchanged (**174**; the two transcribe
+parity steps came with commit 3), `check_static` OK, `cleanup_smoke` clean.
+
+**Two harness constraints worth remembering:** every apply-check captures the
+live budget first and restores total/save/rows before finishing (the server
+DB keeps the owner's real budget), and voice undo appends a reversal journal
+row instead of setting `undone: true` — the later check *"the change log
+renders what happened"* asserts `!html.includes("undone")`.
+
+---
+
 ## 4. What was outstanding — now DONE (2026-10-05)
 
 1. **README Phase 3 edits — done.** Added `income` to the data model, the
@@ -461,9 +517,10 @@ string. Suite **229 / 0**.
 
 - **Keyless parity.** With `AI_API_KEY` set, `server.py` legitimately answers
   better than `db.js`. Parity is only meaningful with the key cleared.
-- **The three AI routes are async offline.** `PWDB.request()` returns a
-  Promise for `/api/ai/extract|instruct|statement`; every caller must `await`.
-  Synchronous routes (including `/api/income`) must stay sync.
+- **The five AI routes are async offline.** `PWDB.request()` returns a
+  Promise for `/api/ai/extract|instruct|statement|voice|transcribe`; every
+  caller must `await`. Synchronous routes (including `/api/income`) must stay
+  sync.
 - **Income validation order mirrors purchases**: date → branch_id → amount →
   source. Error strings must match byte-for-byte between engines.
 - `income` row JSON uses **`amount`**; purchase rows use **`total`**.
@@ -487,16 +544,27 @@ string. Suite **229 / 0**.
 - **Purchase rows use `product` / `total`** (not `product_name` /
   `total_amount` — that shape belongs to the backup JSON envelope only), and
   credit figures live nested at `row.credit` (`paid`, `balance`, `percent`).
-- **`AI_PROMPT_AGENT` is one of the 12 shared constants** — every edit must be
-  mirrored byte-for-byte in `server.py` and `db.js` or audit fails. Prompt
-  text lives only in that pair, never in the UI.
+- **`AI_PROMPT_AGENT` and `AI_PROMPT_VOICE` are among the 13 shared
+  constants** — every edit must be mirrored byte-for-byte in `server.py` and
+  `public/app/db.js` or audit fails. Prompt text lives only in that pair,
+  never in the UI. `/api/ai/transcribe` has no prompt but the same parity
+  duty: same payload `{audio, mime, lang}`, same status codes, same
+  `source:""` failure shape.
 - **The assistant never writes by itself.** Every write tool renders a card
   with an Approve tap (`agentExecute` is the only writer); coverage-off tools
   are *described* to the model as locked, never hidden; `propose_coverage` is
   the one `free: true` tool and is never gated by `app`. Exactly **4**
   coverage areas — never add a 5th (smoke asserts the count).
+- **Every voice chip is also a human tap.** The overlay validates at ask time
+  *and again at apply time* against the amounts that were really spoken
+  (`VOICE.amounts`), checks `aiAllows("app")` before touching anything,
+  confirms `delete_item` / `set_total`, and keeps exactly one step of undo.
+  Microphone consent is asked before the first listen
+  (`pwbudget.voice.mic.v1`); audio is transient — recorded in memory,
+  transcribed, dropped (same rule as images). Voice chrome strings ship
+  en+fr only; the number lexicons cover en/fr/tw/ga/ee/ha.
 - Bump `CACHE` in `public/app/sw.js` whenever `app.js`/`db.js`/`styles.css`/
-  `index.html` change (cache-first SW). Current: `pwbudget-v29`.
+  `index.html` change (cache-first SW). Current: `pwbudget-v32`.
 
 ---
 
@@ -538,6 +606,16 @@ string. Suite **229 / 0**.
   follow-up chips, **Approve all**, the *Try again* card, and voice auto-speak.
   Also still untested with a **real attached model** — the failure/retry path
   was proven against an unreachable endpoint, not a live provider rate-limit.
+- **The voice overlay (§3) has only been exercised headless.** Unverified on a
+  handset: the drag-to-move panel, mic consent + real `getUserMedia`,
+  live Web Speech recognition, TTS read-aloud, and chip taps against the real
+  budget view. The **STT matrix has never run against a live key**: whisper
+  transcription was only exercised as a mocked recorder → route contract
+  (400 without audio, `source:""` when unreachable), and Web Speech only
+  against the harness's fake recognizer. Web Speech itself truly transcribes
+  **en/fr** — tw/ga/ee/ha need the Whisper path (a key). The wake word
+  ("Hey Budget") is deliberately **dormant**, not half-built: nothing listens
+  until the mic is tapped.
 
 ---
 
@@ -551,10 +629,12 @@ string. Suite **229 / 0**.
 Other roadmap ideas in `README.md`: low-stock warnings per item, PIN lock on
 the installed app. (CSV export for the owner has since shipped — *Your data*.)
 
-**Suggested first move in a new session:** commit the uncommitted work
-(assistant v2 + Phase 0) if the four test commands are still green — **ask the
-owner before committing** — then pick **Phase 4** (knowledge base /
-`documents` / `references` / ask-your-books) — or run the still-unanswered
-**browser CORS check** against a real vision provider (§7), which decides
-whether live capture actually works before Phase 4 builds on top of it. A real
-Gemini key end-to-end test of `/api/ai/extract` is also still outstanding.
+**Suggested first move in a new session:** everything through the voice
+overlay is committed (`d2cdec2`) and green — **review in a browser**
+(http://127.0.0.1:8123/app/, server restarted this session on :8123): open the
+🎤 overlay, allow the mic once, say *"set the budget to 5,000 cedis, add 800
+for transport"* in any of the six languages, tap the chips, undo, and check
+the change log's gold-railed rows. Then pick **Phase 4** (knowledge base /
+`documents` / `references` / ask-your-books) — or close the standing gaps in
+§7 first: a **real-key** STT/extract round trip (browser CORS already measured
+for all presets) and the handset pass over assistant + voice.

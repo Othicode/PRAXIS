@@ -49,7 +49,16 @@
 > closing brace, prose around the object, or a cut-off tail no longer swallows
 > its `actions` (this is exactly how one real approved purchase never became
 > a card — see SESSION_STATUS §3.7).
-> Tests now: 173 audit + 229 smoke, 0 failed.
+> Also 2026-10-07 — **voice overlay shipped** (5 commits): `POST /api/ai/voice`
+> in both engines behind the new shared `AI_PROMPT_VOICE` (contract now
+> **13** strings), plus `POST /api/ai/transcribe` (audio → text, same parity
+> rules). `public/app/voice.js` adds the draggable overlay: strict one-JSON
+> action batch, spoken-amounts whitelist, a multilingual number engine
+> (en/fr/tw/ga/ee/ha), consent-gated mic choosing Whisper (push-to-talk →
+> transcribe) or Web Speech, TTS read-aloud, and tap-to-apply chips with
+> one-step ↩ Undo, destructive confirms and the coverage gate at apply time.
+> `CACHE = "pwbudget-v32"`.
+> Tests now: 174 audit + 275 smoke, 0 failed.
 
 ---
 
@@ -70,7 +79,7 @@ build step and no npm dependencies.
 
 - `public/app/db.js` is a **faithful client-side port of `server.py`'s API** —
   same routes, same validation, same response shapes
-  (`PWDB.request(method, path, qs, body) → {status, body}`). The three
+  (`PWDB.request(method, path, qs, body) → {status, body}`). The five
   `/api/ai/*` routes answer with a **Promise** instead, because a model
   round-trip is asynchronous — every caller awaits them.
 - `api()` in `public/app/app.js` chooses: `OFFLINE_ENGINE` or a previously
@@ -119,11 +128,11 @@ budgets          year + month + total + savings target + item allocations (%)
 ### Tests (baseline verified green on 2026-10-07)
 
 ```
-node audit_calculations.js   → 173 passed, 0 failed
+node audit_calculations.js   → 174 passed, 0 failed
                                (calculator, offline↔server parity —
                                including /api/ai/* —, invariants, fixture replay,
-                               12 shared model constants incl. AI_PROMPT_AGENT)
-node smoke_test.js           → 229 passed, 0 failed  — needs a server on :8123
+                               13 shared model constants incl. AI_PROMPT_VOICE)
+node smoke_test.js           → 275 passed, 0 failed  — needs a server on :8123
                                (run `python server.py 8123` first; it does NOT spawn one)
 python tools/cleanup_smoke.py  → wipes smoke rows from ledger.db afterwards
 ```
@@ -174,7 +183,7 @@ capture ──▶ extract ──▶ confirm ──▶ record ──▶ remember
 | 6 | **Ask-your-books chat** | Turn a question into a structured answer (chart/table + prose) over the knowledge base | Keyword/intent matcher hitting existing `/api/analytics` etc. |
 | 7 | **Auto insights / weekly digest** | Write the narrative over locally-computed numbers | Existing `buildAlerts()` reminder engine, no prose |
 | 8 | **Forecast & smart budget** | Explain and refine a forecast | Local stats (moving average / linear trend) feeding the existing ⚡ recommender |
-| 9 | **Voice entry** | Parse transcript into the entry form | Browser Web Speech API → same parser as feature 2 |
+| 9 | **Voice entry** ✅ *shipped as the voice overlay (2026-10-07)* | `/api/ai/voice` turns a transcript into one strict JSON `{reply, actions}` over the budget snapshot; amounts must match what was spoken | Fully local: per-language number lexicon (en/fr/tw/ga/ee/ha) + action validator; Web Speech dictation or Whisper via `/api/ai/transcribe` when a key is attached |
 | 10 | **Automated reminders / exports** | Phrase scheduled digests | `threading` timer + existing admin CSV/JSON export |
 | 11 | **AI feature builder** | Turn an instruction into a *new UI feature* | Builder disabled without a key; previously-created features still render |
 
@@ -316,6 +325,7 @@ regression suite. Nothing built meanwhile is thrown away.
 | 3 | Income side + statement/slip ingest | ✅ **done 2026-10-04** — `income` table (`date, branch_id, source, reference, amount, memo`) with `GET/POST /api/income` + `DELETE /api/income/{id}` in both engines; **Money in** view (list, search, month filter, pager, delete, ＋ Money in dialog); analytics gains `series[].income`, `totals.income` / `totals.net`; dashboard gains a *Money in this month* KPI and a money-in series in the spend chart; `/api/meta` `months` now unions purchases **and** income. **Statement ingest** card: paste / 📂 CSV / 📷 screenshot → `POST /api/ai/statement` → candidates with a *read by …* source line, `uncertain[]` as a warning, money-in rows ticked by default and *Record money in* looping `POST /api/income`; money-out rows are shown, tick-disabled and labelled "record it as a purchase instead". Gated by the existing `capture` coverage area (no 5th area, so the settings matrix still ships 4). `db.js`'s `aiInstruct`/`aiStatement` gained the same model path as `server.py`, all three AI routes are now Promises offline, and the 3 statement/instruct prompts were hoisted into shared constants (contract check: 6 → **9**). 148 smoke + 160 audit assertions |
 | 0 | **Your data**: loud storage failures + backup / restore / CSV export | ✅ **done 2026-10-05** — `db.js`'s `save()` no longer swallows quota errors: `request()` snapshots the store and, if the write did not stick, rolls back and answers **507** with a shared sentence (`server.py` answers 507 too when sqlite reports a full/read-only disk — probed for real with `attrib +R ledger.db`). Persistent red storage banner until a save succeeds. **Your data** dialog: one-file backup in the offline engine's own shape (assembled through the API in server mode), **additive restore** replayed through the ordinary create paths (never deletes, idempotent — no new endpoints to mirror), and purchases/credits/money-in CSV export with BOM. Read fan-out batched to 4: a 72-way parallel burst was enough to get a connection refused and silently downgrade the app to offline for the rest of the session. 165 smoke + 160 audit assertions |
 | A–D | **Assistant v2 (agentic)**: honest capability reporting + retry, richer reads, briefing & follow-ups, approve-gated write powers | ✅ **done 2026-10-07** — 24 tools; coverage-off tools described as `[locked]` (never hidden), `AI_PROMPT_AGENT` says so and became a shared contract string (**12**); `agentTurn` retries once, a dead turn renders *Try again*; keyless **briefing** on open + `agentFollowups` chips; new reads (`get_purchase`, `compare_months`, `get_reminders`, `price_trend`, `top_suppliers`, `navigate`, `search_income`, `budget_health`); write powers still behind Approve: `propose_coverage` (free tool, flips a coverage switch), `import_slip` (one card per line), `backup_books` (file card), **Approve all**; reports take `{month, year, branch_id}`; `CACHE = "pwbudget-v29"`; 229 smoke + 173 audit assertions |
+| V | **Voice overlay**: summon the assistant by voice, multilingual STT, strict-JSON budget actions, tap-to-apply + one-step undo | ✅ **done 2026-10-07** — `POST /api/ai/voice` + `POST /api/ai/transcribe` in both engines, `AI_PROMPT_VOICE` as shared constant **13**; `public/app/voice.js`: draggable panel (fab + Ctrl+Shift+Space, drag-to-move), number engine for en/fr/tw/ga/ee/ha, reply parser + validator (spoken-amounts whitelist, ≤6 flat ops, destructive `confirm`), consent-gated mic → Whisper push-to-talk or Web Speech fallback, TTS read-aloud, en/fr chrome; chips apply to the shown budget month (percent of spendable) with confirm on delete/set-total, **↩ Undo**, change-log rows with a gold rail, coverage gate at apply time; `CACHE = "pwbudget-v32"`; 275 smoke + 174 audit assertions |
 | 4 | Knowledge base: `documents`/`references`, `/api/search`, then chat | Worthless until phases 2–3 have produced data |
 | 5 | Builder | Riskiest surface, least valuable for this audience |
 
