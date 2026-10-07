@@ -4925,7 +4925,7 @@ window.PWApp = {
   get state() { return state; },
   get AGENT() { return AGENT; },
   api, offlineRequest, toast, cur, esc, monthName,
-  switchView, aiAllows, aiConfigured,
+  switchView, aiAllows, aiConfigured, aiBase,
   snapshotBudget, renderBudgetBody, saveBudget, loadBudget,
   refreshMeta, openAiDialog, agentJournal, saveAgent,
 };

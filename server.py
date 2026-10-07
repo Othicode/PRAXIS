@@ -18,6 +18,7 @@ Data model
   budgets       year+month plan: total + savings target + per-item allocations.
 """
 
+import base64
 import calendar
 import csv
 import datetime as dt
@@ -1745,6 +1746,74 @@ def ai_voice(payload):
     return 200, {"text": out, "source": "model"}
 
 
+def _ai_transcribe(raw, mime, lang):
+    """Audio in, the model's text out, or None on any failure — the same
+    contract as _ai_chat. Only Groq and OpenAI serve /audio/transcriptions;
+    the others never reach here because ai_transcribe() has no keyless path
+    and the panel only chooses this backend for those hosts."""
+    ext = "webm"
+    if "mp4" in mime:
+        ext = "mp4"
+    elif "ogg" in mime:
+        ext = "ogg"
+    elif "wav" in mime:
+        ext = "wav"
+    model = "whisper-large-v3-turbo" if "groq" in AI_BASE_URL.lower() else "whisper-1"
+    boundary = "pw" + secrets.token_hex(12)
+    head = []
+
+    def field(name, value):
+        head.append(
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+            f"{value}\r\n".encode("utf-8"))
+
+    field("model", model)
+    if lang in ("en", "fr"):
+        field("language", lang)
+    head.append(
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="speech.{ext}"\r\n'
+        f"Content-Type: {mime}\r\n\r\n".encode("utf-8") + raw + b"\r\n")
+    head.append(f"--{boundary}--\r\n".encode("utf-8"))
+    req = urllib.request.Request(
+        f"{AI_BASE_URL.rstrip('/')}/audio/transcriptions", data=b"".join(head),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                 "Authorization": f"Bearer {AI_API_KEY}"})
+    try:
+        with urllib.request.urlopen(req, timeout=AI_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        text = str(data.get("text") or "").strip()
+    except Exception:  # noqa: BLE001 — network, timeout, bad payload, bad JSON
+        return None
+    return text or None
+
+
+def ai_transcribe(payload):
+    """The voice overlay's speech-to-text — mirror of db.js aiTranscribe().
+
+    The panel sends recorded audio (base64), its container mime and the
+    owner's language; back goes the transcription for voice.js to hand to
+    the same engine that answers /api/ai/voice."""
+    audio = str(payload.get("audio") or "")
+    if not audio.strip():
+        return 400, {"error": AI_NOTHING_ERROR}
+    if not AI_API_KEY:
+        return 400, {"error": AI_NOTHING_ERROR}
+    lang = str(payload.get("lang") or "en")[:12]
+    mime = str(payload.get("mime") or "audio/webm")[:60].split(";")[0] or "audio/webm"
+    try:
+        raw = base64.b64decode(audio, validate=True)
+    except Exception:  # noqa: BLE001 — malformed padding, wrong alphabet
+        return 400, {"error": AI_NOTHING_ERROR}
+    if not raw:
+        return 400, {"error": AI_NOTHING_ERROR}
+    out = _ai_transcribe(raw, mime, lang)
+    if out is None:
+        return 200, {"text": AI_AGENT_DOWN, "source": ""}
+    return 200, {"text": out, "source": "model"}
+
+
 # ---------------------------------------------------------------------------
 # HTTP layer
 # ---------------------------------------------------------------------------
@@ -1994,6 +2063,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(body, status)
             if path == "/api/ai/voice" and method == "POST":
                 status, body = ai_voice(payload or {})
+                return self.send_json(body, status)
+            if path == "/api/ai/transcribe" and method == "POST":
+                status, body = ai_transcribe(payload or {})
                 return self.send_json(body, status)
 
             return self.send_json({"error": "not found"}, 404)

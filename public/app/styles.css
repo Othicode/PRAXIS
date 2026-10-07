@@ -1899,6 +1899,7 @@ body.voice-open #btn-new { opacity: 0; pointer-events: none; }
   display: grid; place-items: center; font-size: 13px;
 }
 .voice-head strong { flex: 1 1 auto; font-size: 13.5px; color: var(--gold-hi); }
+.voice-tts.on { color: var(--gold); border-color: var(--gold); }
 .voice-lang {
   background: var(--field); color: var(--ink);
   border: 1px solid var(--line); border-radius: 8px;

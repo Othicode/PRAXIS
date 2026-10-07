@@ -2,6 +2,7 @@
   "use strict";
 
   const VOICE_PREFS_KEY = "pwbudget.voice.v1";
+  const VOICE_CONSENT_KEY = "pwbudget.voice.mic.v1";
 
   const VOICE_LANGS = {
     en: {
@@ -139,15 +140,23 @@
       think: "Thinking…",
       idle: "Say it or type it — nothing changes until it is checked.",
       offline: "I could not reach the model just now — please try again.",
-      micSoon: "The microphone arrives in the next step — type for now.",
       empty: "Say or type something first.",
+      consent: "The microphone stays on this device — tap it again to start.",
+      micNone: "No microphone here — type your request instead.",
+      micDenied: "The microphone was refused — allow it in your browser, or type instead.",
+      listening: "Listening…",
+      recording: "Recording — tap the microphone again when you are done.",
     },
     fr: {
       think: "Réflexion…",
       idle: "Dites-le ou écrivez-le — rien ne change avant vérification.",
       offline: "Je n'ai pas pu joindre le modèle — veuillez réessayer.",
-      micSoon: "Le micro arrive à la prochaine étape — écrivez pour l'instant.",
       empty: "Dites ou écrivez d'abord quelque chose.",
+      consent: "Le micro reste sur cet appareil — touchez-le encore pour commencer.",
+      micNone: "Pas de micro ici — écrivez plutôt votre demande.",
+      micDenied: "Le micro a été refusé — autorisez-le dans le navigateur, ou écrivez.",
+      listening: "À l'écoute…",
+      recording: "Enregistrement — touchez le micro encore quand vous avez fini.",
     },
   };
 
@@ -155,6 +164,8 @@
     open: false, inited: false, asking: false,
     lang: "en", tts: false, wake: false,
     history: [], pending: [], transcript: "", reply: "",
+    mic: null, sr: null, rec: null, consentPending: false,
+    whisperCancel: false, micError: "",
   };
 
   const $ = (s) => (typeof document !== "undefined" && document ? document.querySelector(s) : null);
@@ -490,6 +501,7 @@
   }
 
   function voiceClose() {
+    voiceMicStop(true);
     VOICE.open = false;
     const p = $("#voice-panel");
     if (p) { p.classList.remove("open"); p.setAttribute("aria-hidden", "true"); }
@@ -537,6 +549,7 @@
     const A = (typeof window !== "undefined" && window) ? window.PWApp : null;
     const t = String(text || "").trim();
     if (!t) { setStatus(str("empty")); return null; }
+    if (VOICE.mic) voiceMicStop(true);
     if (!A || VOICE.asking) return null;
     VOICE.asking = true;
     VOICE.transcript = t;
@@ -590,14 +603,259 @@
       renderReply(last.reply);
       voiceRenderChips(last.actions);
       setStatus(str("idle"));
+      voiceSpeak(last.reply);
       return last;
     } finally {
       VOICE.asking = false;
     }
   }
 
+  function voiceApp() {
+    return (typeof window !== "undefined" && window) ? window.PWApp : null;
+  }
+
+  function voiceWindow() {
+    return (typeof window !== "undefined" && window) ? window : null;
+  }
+
+  function voiceSR() {
+    const w = voiceWindow();
+    return (w && (w.SpeechRecognition || w.webkitSpeechRecognition)) || null;
+  }
+
+  function voiceMicConsent() {
+    try { return localStorage.getItem(VOICE_CONSENT_KEY) === "yes"; } catch (e) { return false; }
+  }
+
+  function voiceSttProvider() {
+    const w = voiceWindow();
+    const nav = w && w.navigator;
+    const A = voiceApp();
+    const recordable = !!(w && w.MediaRecorder && nav && nav.mediaDevices &&
+      nav.mediaDevices.getUserMedia);
+    let whisper = false;
+    try {
+      whisper = !!(A && A.aiConfigured && A.aiConfigured() && A.aiBase &&
+        /groq|openai/i.test(A.aiBase()));
+    } catch (e) { whisper = false; }
+    if (whisper && recordable) return "whisper";
+    if (voiceSR()) return "webspeech";
+    return null;
+  }
+
+  function voiceWave(on) {
+    const el = $("#voice-wave");
+    if (el) el.hidden = !on;
+  }
+
+  function voiceMicFail(key) {
+    VOICE.mic = null; VOICE.sr = null; VOICE.rec = null;
+    VOICE.whisperCancel = false;
+    VOICE.micError = key || "micDenied";
+    voiceWave(false);
+    setStatus(str(VOICE.micError));
+  }
+
+  function voiceMicStop(cancel) {
+    const p = VOICE.mic;
+    if (!p || p === "transcribing") return;
+    if (p === "whisper") {
+      VOICE.whisperCancel = !!cancel;
+      try {
+        if (VOICE.rec && VOICE.rec.state !== "inactive") VOICE.rec.stop();
+      } catch (e) { voiceMicFail("micDenied"); return; }
+      if (cancel && (!VOICE.rec || VOICE.rec.state === "inactive")) {
+        VOICE.mic = null;
+        voiceWave(false);
+      }
+      return;
+    }
+    const sr = VOICE.sr;
+    if (!sr) { VOICE.mic = null; voiceWave(false); return; }
+    try { if (cancel) sr.cancel(); else sr.stop(); }
+    catch (e) { /* already ended */ }
+  }
+
+  function voiceMicWebspeech() {
+    const SR = voiceSR();
+    if (!SR) { voiceMicFail("micNone"); return; }
+    let rec;
+    try { rec = new SR(); } catch (e) { voiceMicFail("micDenied"); return; }
+    const finals = [];
+    let done = false, cancelled = false, err = "";
+    rec.interimResults = true;
+    rec.continuous = false;
+    rec.lang = (VOICE_LANGS[VOICE.lang] || VOICE_LANGS.en).stt || "en";
+    rec.onresult = (e) => {
+      let live = "";
+      const list = (e && e.results) || [];
+      for (let i = 0; i < list.length; i++) {
+        const r = list[i];
+        const t = r && r[0] ? String(r[0].transcript || "") : "";
+        if (r && r.isFinal) { if (t.trim()) finals.push(t.trim()); }
+        else live += t;
+      }
+      const seen = finals.concat(live ? [live] : []).join(" ").trim();
+      if (seen) { VOICE.transcript = seen; renderTranscript(seen); }
+    };
+    rec.onerror = (e) => {
+      const code = String((e && e.error) || "");
+      if (code === "not-allowed" || code === "service-not-allowed" ||
+        code === "audio-capture") err = "micDenied";
+    };
+    rec.onend = () => {
+      if (done) return;
+      done = true;
+      voiceWave(false);
+      VOICE.sr = null;
+      if (VOICE.mic === "webspeech") VOICE.mic = null;
+      const t = cancelled ? "" : finals.join(" ").trim();
+      if (err) setStatus(str(err));
+      else if (t) voiceAsk(t);
+      else setStatus(str("idle"));
+    };
+    VOICE.sr = {
+      stop() { try { rec.stop(); } catch (e) { /* already ended */ } },
+      cancel() { cancelled = true; try { rec.stop(); } catch (e) { /* already ended */ } },
+    };
+    VOICE.mic = "webspeech";
+    VOICE.micError = "";
+    voiceWave(true);
+    setStatus(str("listening"));
+    try { rec.start(); } catch (e) { voiceMicFail("micDenied"); }
+  }
+
+  async function voiceBlobB64(blob) {
+    const buf = await blob.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
+  }
+
+  async function voiceTranscribe(b64, mime) {
+    const A = voiceApp();
+    if (!A) return "";
+    const payload = {
+      audio: b64,
+      mime: String(mime || "audio/webm").slice(0, 60),
+      lang: VOICE.lang,
+    };
+    let r = null;
+    try {
+      if (A.aiConfigured() && typeof PWDB !== "undefined") {
+        r = await A.offlineRequest("POST", "/api/ai/transcribe", {}, payload);
+      } else {
+        r = await A.api("/api/ai/transcribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      }
+    } catch (e) { r = null; }
+    if (!r || !r.source || typeof r.text !== "string") return "";
+    return r.text.trim();
+  }
+
+  async function voiceMicWhisper() {
+    const w = voiceWindow();
+    const nav = w && w.navigator;
+    VOICE.mic = "whisper";
+    VOICE.micError = "";
+    VOICE.whisperCancel = false;
+    voiceWave(true);
+    setStatus(str("recording"));
+    let stream = null;
+    try {
+      stream = await nav.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) { voiceMicFail("micDenied"); return; }
+    const stopTracks = () => {
+      try {
+        const tracks = stream && stream.getTracks ? stream.getTracks() : [];
+        tracks.forEach((t) => { try { if (t.stop) t.stop(); } catch (e2) { /* noop */ } });
+      } catch (e2) { /* no tracks */ }
+    };
+    if (VOICE.mic !== "whisper") { stopTracks(); return; }
+    let rec;
+    try { rec = new w.MediaRecorder(stream); }
+    catch (e) { stopTracks(); voiceMicFail("micDenied"); return; }
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e && e.data) chunks.push(e.data); };
+    rec.onstop = () => {
+      stopTracks();
+      VOICE.rec = null;
+      const cancelled = VOICE.whisperCancel;
+      VOICE.whisperCancel = false;
+      if (cancelled) {
+        if (VOICE.mic === "whisper") VOICE.mic = null;
+        voiceWave(false);
+        return;
+      }
+      VOICE.mic = "transcribing";
+      setStatus(str("think"));
+      (async () => {
+        let text = "";
+        try {
+          const type = String(rec.mimeType || "audio/webm").split(";")[0] || "audio/webm";
+          const blob = new Blob(chunks, { type });
+          text = await voiceTranscribe(await voiceBlobB64(blob), type);
+        } catch (e) { text = ""; }
+        if (VOICE.mic === "transcribing") VOICE.mic = null;
+        voiceWave(false);
+        if (text) voiceAsk(text);
+        else setStatus(str("offline"));
+      })();
+    };
+    VOICE.rec = rec;
+    try { rec.start(); } catch (e) { stopTracks(); voiceMicFail("micDenied"); }
+  }
+
   function voiceMic() {
-    setStatus(str("micSoon"));
+    if (VOICE.mic) { voiceMicStop(false); return; }
+    const p = voiceSttProvider();
+    if (!p) { setStatus(str("micNone")); return; }
+    if (!voiceMicConsent()) {
+      if (VOICE.consentPending) {
+        VOICE.consentPending = false;
+        try { localStorage.setItem(VOICE_CONSENT_KEY, "yes"); } catch (e) { /* private mode */ }
+      } else {
+        VOICE.consentPending = true;
+        setStatus(str("consent"));
+        return;
+      }
+    }
+    if (p === "whisper") voiceMicWhisper();
+    else voiceMicWebspeech();
+  }
+
+  function voiceSpeak(t) {
+    const w = voiceWindow();
+    if (!VOICE.tts || !t || !(w && w.speechSynthesis && w.SpeechSynthesisUtterance)) return;
+    try {
+      w.speechSynthesis.cancel();
+      const u = new w.SpeechSynthesisUtterance(String(t));
+      u.lang = (VOICE_LANGS[VOICE.lang] || VOICE_LANGS.en).stt || "en";
+      w.speechSynthesis.speak(u);
+    } catch (e) { /* speech is a courtesy */ }
+  }
+
+  function voiceSetTts(on) {
+    VOICE.tts = !!on;
+    const p = voicePrefs();
+    p.tts = VOICE.tts;
+    voiceSavePrefs(p);
+    const b = $("#voice-tts");
+    if (b) {
+      b.classList.toggle("on", VOICE.tts);
+      b.setAttribute("aria-pressed", VOICE.tts ? "true" : "false");
+    }
+    if (!VOICE.tts) {
+      const w = voiceWindow();
+      if (w && w.speechSynthesis) { try { w.speechSynthesis.cancel(); } catch (e) { /* noop */ } }
+    }
+    return VOICE.tts;
   }
 
   function voiceDrag() {
@@ -635,6 +893,11 @@
     VOICE.lang = prefs.lang;
     VOICE.tts = prefs.tts;
     VOICE.wake = prefs.wake;
+    const tts = $("#voice-tts");
+    if (tts) {
+      tts.addEventListener("click", () => voiceSetTts(!VOICE.tts));
+      voiceSetTts(VOICE.tts);
+    }
     const sel = $("#voice-lang");
     if (sel) {
       sel.innerHTML = Object.keys(VOICE_LANGS).map((k) =>
@@ -680,6 +943,11 @@
     prefs: voicePrefs,
     savePrefs: voiceSavePrefs,
     mic: voiceMic,
+    sttProvider: voiceSttProvider,
+    micActive: () => !!VOICE.mic,
+    micConsent: voiceMicConsent,
+    setTts: voiceSetTts,
+    ttsOn: () => VOICE.tts,
     setStatus,
     renderChips: voiceRenderChips,
     chipLabel: voiceChipLabel,

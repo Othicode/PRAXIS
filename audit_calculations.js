@@ -510,6 +510,11 @@ async function scenario(call) {
     transcript: "make it 400", lang: "tw",
     history: [{ role: "user", content: "change transport to 500" }],
   });
+  await step("ai:transcribe empty", "POST", "/api/ai/transcribe", {}, {});
+  await step("ai:transcribe no provider", "POST", "/api/ai/transcribe", {}, {
+    audio: Buffer.from("fake-audio-bytes").toString("base64"),
+    mime: "audio/webm", lang: "en",
+  });
   await step("ai:unknown route", "POST", "/api/ai/nope", {}, {});
 
   return log;

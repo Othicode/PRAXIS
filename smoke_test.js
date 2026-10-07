@@ -108,6 +108,33 @@ class FakeStorage {
   removeItem(k) { this.m.delete(k); }
   clear() { this.m.clear(); }
 }
+
+/* ---- microphone + speech stubs for the voice overlay ---- */
+const SR_INSTANCES = [];
+class FakeSR {
+  constructor() {
+    this.lang = ""; this.interimResults = false; this.continuous = false;
+    this.started = false; this.stopped = false;
+    SR_INSTANCES.push(this);
+  }
+  start() { this.started = true; }
+  stop() { this.stopped = true; if (this.onend) this.onend(); }   // the browser fires end after stop
+  partial(t) { if (this.onresult) this.onresult({ results: [{ isFinal: false, 0: { transcript: t } }] }); }
+  final(t) { if (this.onresult) this.onresult({ results: [{ isFinal: true, 0: { transcript: t } }] }); }
+  end() { if (this.onend) this.onend(); }
+}
+const REC_INSTANCES = [];
+class FakeRecorder {
+  constructor() { this.state = "inactive"; this.mimeType = "audio/webm"; REC_INSTANCES.push(this); }
+  start() { this.state = "recording"; }
+  stop() {
+    if (this.state === "inactive") return;
+    this.state = "inactive";
+    if (this.ondataavailable) this.ondataavailable({ data: new Blob(["fake-audio"]) });
+    if (this.onstop) this.onstop();
+  }
+}
+const SPOKEN = [];
 const realFetch = global.fetch;
 global.fetch = (url, opts) =>
   realFetch(typeof url === "string" && !/^https?:\/\//.test(url) ? BASE + url : url, opts);
@@ -119,6 +146,13 @@ function loadApp(mode) {
   registry.clear();
   global.document = makeDocument();
   global.window = { _creditCache: [], _picked: null };
+  global.window.webkitSpeechRecognition = FakeSR;
+  global.window.MediaRecorder = FakeRecorder;
+  global.window.navigator = {
+    mediaDevices: { getUserMedia: async () => ({ getTracks: () => [] }) },
+  };
+  global.window.speechSynthesis = { speak: (u) => SPOKEN.push(u), cancel() {} };
+  global.window.SpeechSynthesisUtterance = function (t) { this.text = String(t); this.lang = ""; };
   global.localStorage = new FakeStorage();
   global.location = { search: mode === "offline" ? "?offline" : "" };
   const src = fs.readFileSync(path.join(__dirname, "public", "app", "app.js"), "utf8");
@@ -861,6 +895,114 @@ async function runMode(mode) {
     return r === null && byId("voice-note").textContent === "Say or type something first.";
   });
 
+  await check(mode + ": the panel picks a microphone backend", () => {
+    const V = pw.VoiceOverlay;
+    localStorage.setItem("pwbudget.ai.v1", JSON.stringify(
+      { provider: "gemini", base: "", model: "", key: "" }));
+    pw.loadAI();
+    const w = global.window;
+    const live = w.webkitSpeechRecognition;
+    delete w.webkitSpeechRecognition;
+    const none = V.sttProvider();
+    w.webkitSpeechRecognition = live;
+    const web = V.sttProvider();
+    localStorage.setItem("pwbudget.ai.v1", JSON.stringify(
+      { provider: "custom", base: "http://127.0.0.1:8123/openai",
+        model: "test-model", key: "sk-test" }));
+    pw.loadAI();
+    const whisper = V.sttProvider();
+    localStorage.setItem("pwbudget.ai.v1", JSON.stringify(
+      { provider: "gemini", base: "", model: "", key: "" }));
+    pw.loadAI();
+    const restored = V.sttProvider();
+    return none === null && web === "webspeech" &&
+      whisper === "whisper" && restored === "webspeech";
+  });
+
+  await check(mode + ": the microphone asks before it listens", () => {
+    const V = pw.VoiceOverlay;
+    localStorage.removeItem("pwbudget.voice.mic.v1");
+    SR_INSTANCES.length = 0;
+    V.mic();
+    const asked = SR_INSTANCES.length === 0 &&
+      /microphone/i.test(byId("voice-note").textContent);
+    V.mic();
+    const rec = SR_INSTANCES[SR_INSTANCES.length - 1];
+    const listening = SR_INSTANCES.length === 1 && rec && rec.started === true &&
+      V.micActive() === true && byId("voice-wave").hidden === false;
+    const saved = localStorage.getItem("pwbudget.voice.mic.v1") === "yes";
+    V.mic();
+    const stopped = V.micActive() === false && byId("voice-wave").hidden === true;
+    return asked && listening && saved && stopped;
+  });
+
+  await check(mode + ": a recognized line is asked for real", async () => {
+    const V = pw.VoiceOverlay;
+    const before = V.state().history;
+    V.mic();
+    const rec = SR_INSTANCES[SR_INSTANCES.length - 1];
+    const started = !!(rec && rec.started);
+    rec.final("what is my total budget?");
+    rec.end();
+    await sleep(250);
+    return started && V.micActive() === false &&
+      byId("voice-transcript").textContent === "what is my total budget?" &&
+      byId("voice-reply").textContent.length > 0 &&
+      V.state().history === before + 2 &&
+      byId("voice-wave").hidden === true;
+  });
+
+  await check(mode + ": tapping the mic again stops the listening", () => {
+    const V = pw.VoiceOverlay;
+    V.mic();
+    const rec = SR_INSTANCES[SR_INSTANCES.length - 1];
+    rec.partial("five hun");
+    const mid = byId("voice-transcript").textContent;
+    V.mic();
+    return rec.stopped === true && V.micActive() === false &&
+      mid === "five hun" && byId("voice-wave").hidden === true;
+  });
+
+  await check(mode + ": a recorded line goes through the transcribe route", async () => {
+    const V = pw.VoiceOverlay;
+    localStorage.setItem("pwbudget.ai.v1", JSON.stringify(
+      { provider: "custom", base: "http://127.0.0.1:8123/openai",
+        model: "test-model", key: "sk-test" }));
+    pw.loadAI();
+    const backend = V.sttProvider();
+    REC_INSTANCES.length = 0;
+    V.mic();
+    await sleep(30);                       // getUserMedia resolves on a microtask
+    const rec = REC_INSTANCES[REC_INSTANCES.length - 1];
+    const recording = backend === "whisper" && rec && rec.state === "recording" &&
+      V.micActive() === true && byId("voice-wave").hidden === false;
+    V.mic();
+    await sleep(500);
+    const note = byId("voice-note").textContent;
+    const down = V.micActive() === false && byId("voice-wave").hidden === true &&
+      /reach/.test(note);
+    localStorage.setItem("pwbudget.ai.v1", JSON.stringify(
+      { provider: "gemini", base: "", model: "", key: "" }));
+    pw.loadAI();
+    return recording && down;
+  });
+
+  await check(mode + ": replies can be read aloud", async () => {
+    const V = pw.VoiceOverlay;
+    SPOKEN.length = 0;
+    const startOff = V.ttsOn() === false;
+    V.setTts(true);
+    const on = V.ttsOn() === true &&
+      JSON.parse(localStorage.getItem("pwbudget.voice.v1") || "{}").tts === true &&
+      byId("voice-tts").getAttribute("aria-pressed") === "true";
+    await V.submit("what is my total budget?");
+    const spoke = SPOKEN.length === 1 && SPOKEN[0].text.length > 0;
+    V.setTts(false);
+    await V.submit("what is my total budget?");
+    const silent = SPOKEN.length === 1;
+    return startOff && on && spoke && silent && V.ttsOn() === false;
+  });
+
   await check(mode + ": a read tool answers without asking first", async () => {
     const out = await pw.agentRunTool(pw.AGENT_TOOL("overview"), {});
     const rep = await pw.agentRunTool(pw.AGENT_TOOL("list_changes"), {});
@@ -1178,6 +1320,20 @@ async function runMode(mode) {
       headers: { "Content-Type": "application/json" }, body: "{}" });
     return r.status === 200 && typeof j.text === "string" && j.text.length > 0 &&
       bad.status === 400;
+  });
+
+  await check(mode + ": /api/ai/transcribe refuses without audio", async () => {
+    const empty = await fetch(BASE + "/api/ai/transcribe", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const ej = await empty.json();
+    const withAudio = await fetch(BASE + "/api/ai/transcribe", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ audio: Buffer.from("not a real recording").toString("base64"),
+                             mime: "audio/webm", lang: "en" }) });
+    const aj = await withAudio.json();
+    return empty.status === 400 && withAudio.status === 400 &&
+      ej.error === "nothing to read \u2014 provide text or an image" &&
+      aj.error === ej.error;
   });
 
   // ---- money in: a person records it, or a statement proposes it ----

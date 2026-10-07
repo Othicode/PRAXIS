@@ -953,8 +953,48 @@ async function aiVoice(payload) {
   parts.push("Budget snapshot: " + JSON.stringify(snap).slice(0, 4000));
   parts.push("Transcript: " + transcript.slice(0, 2000));
   parts.push("Reply with the JSON object now.");
-  const text = await aiChat(parts.join("\n\n"), null, AI_PROMPT_VOICE);
-  if (text === null) return [200, { text: AI_AGENT_DOWN, source: "" }];
+    const text = await aiChat(parts.join("\n\n"), null, AI_PROMPT_VOICE);
+    if (text === null) return [200, { text: AI_AGENT_DOWN, source: "" }];
+    return [200, { text, source: "model" }];
+}
+
+/* The voice overlay's speech-to-text — mirror of server.py ai_transcribe().
+   Recorded audio travels as base64 (it never touches our server: when this
+   device holds the key, the upload goes straight to the provider). */
+async function aiTranscribe(payload) {
+  const audio = payload && typeof payload.audio === "string" ? payload.audio : "";
+  if (!audio.trim()) return [400, { error: AI_NOTHING_ERROR }];
+  if (!providerSet()) return [400, { error: AI_NOTHING_ERROR }];
+  const cfg = AI_PROVIDER;
+  const lang = String((payload && payload.lang) || "en").slice(0, 12);
+  const mime = String((payload && payload.mime) || "audio/webm").slice(0, 60)
+    .split(";")[0] || "audio/webm";
+  let bytes;
+  try {
+    const bin = atob(audio);
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  } catch (e) {
+    return [400, { error: AI_NOTHING_ERROR }];
+  }
+  const model = /groq/i.test(cfg.baseUrl) ? "whisper-large-v3-turbo" : "whisper-1";
+  const fd = new FormData();
+  fd.append("model", model);
+  if (lang === "en" || lang === "fr") fd.append("language", lang);
+  fd.append("file", new Blob([bytes], { type: mime }),
+    "speech." + (mime.split("/")[1] || "webm"));
+  let data;
+  try {
+    const res = await fetch(`${cfg.baseUrl}/audio/transcriptions`, {
+      method: "POST", headers: { Authorization: `Bearer ${cfg.key}` }, body: fd,
+    });
+    if (!res.ok) return [200, { text: AI_AGENT_DOWN, source: "" }];
+    data = await res.json();
+  } catch (e) {
+    return [200, { text: AI_AGENT_DOWN, source: "" }];
+  }
+  const text = String((data && data.text) || "").trim();
+  if (!text) return [200, { text: AI_AGENT_DOWN, source: "" }];
   return [200, { text, source: "model" }];
 }
 
@@ -1360,6 +1400,8 @@ function route(method, path, qs, body) {
     return aiAgent(body).then((r) => ({ status: r[0], body: r[1] }));
   if (path === "/api/ai/voice" && method === "POST")
     return aiVoice(body).then((r) => ({ status: r[0], body: r[1] }));
+  if (path === "/api/ai/transcribe" && method === "POST")
+    return aiTranscribe(body).then((r) => ({ status: r[0], body: r[1] }));
 
   return { status: 404, body: { error: "not found" } };
 }
