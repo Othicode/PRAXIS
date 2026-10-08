@@ -184,6 +184,11 @@ module.exports = {
   loadAgent, saveAgent, renderAgent, renderAgentStatus,
   agentOpen, agentClose, agentMic, agentToggleVoice, agentAutogrow,
   showChatPane, toggleChatSidebar, syncChatUser,
+  agentNewSession, agentSwitchSession, agentDeleteSession, agentRenameSession,
+  agentTogglePin, agentMoveSession, agentAddProject, agentDeleteProject,
+  agentSession, activeSession, agentSessionTitle, agentAutoTitle,
+  renderSidebar, openRowMenu, closeRowMenu, renderRowMenu, runRowMenuAction,
+  closestAttr, capSessions,
   agentPrepare, agentRunTool, agentExecute, agentDecide, agentUndo,
   agentBuildReport, agentReportModel, pdfFromReport, docxFromReport,
   zipStore, crc32, renderJournal, openJournal,
@@ -770,6 +775,217 @@ async function runMode(mode) {
     const opened = !menu.classList.contains("hidden") && btn.getAttribute("aria-expanded") === "true";
     menu.dispatch("click", { target: { getAttribute: (k) => (k === "data-umenu" ? "theme" : null) } });
     return opened && menu.classList.contains("hidden");
+  });
+
+  await check(mode + ": a reload archives the open chat and starts a new one", () => {
+    // The shape shipped before sessions existed: one flat conversation.
+    localStorage.setItem("pwbudget.agent.v1", JSON.stringify({
+      messages: [
+        { role: "user", text: "Please tell me which item got more expensive", mid: 1 },
+        { role: "assistant", text: "Ribbons rose from 12 to 15.", mid: 2 },
+      ],
+      journal: [{ id: 1, label: "test entry", detail: "seeded" }],
+      voice: true, seq: 9, jseq: 4,
+    }));
+    pw.loadAgent();
+    const A = pw.AGENT;
+    const archived = A.sessions.find((s) => s.messages.length === 2);
+    const active = pw.activeSession();
+    const migrated = A.sessions.length === 2 && active.messages.length === 0 &&
+      archived && archived.id !== active.id &&
+      pw.agentSessionTitle(archived).indexOf("expensive") !== -1 &&
+      pw.agentSessionTitle(archived) !== "New chat" &&
+      A.journal.length === 1 && A.voice === true && A.seq === 9 && A.jseq === 4;
+    pw.loadAgent();                       // reload again: the empty chat is reused
+    const noLitter = pw.AGENT.sessions.length === 2 && pw.activeSession().messages.length === 0;
+    // hand a clean slate to the checks that follow
+    localStorage.setItem("pwbudget.agent.v1", JSON.stringify({
+      sessions: [], cur: 0, projects: [], journal: [], voice: false, seq: 1, jseq: 1, ui: {},
+    }));
+    pw.loadAgent();
+    const clean = pw.AGENT.sessions.length === 1 && pw.activeSession().messages.length === 0 &&
+      pw.AGENT.journal.length === 0 && pw.AGENT.voice === false;
+    return migrated && noLitter && clean;
+  });
+
+  await check(mode + ": the sidebar groups chats by day and pins first", () => {
+    const A = pw.AGENT;
+    const day = 86400000, now = Date.now();
+    A.sessions = [
+      { id: 901, title: "", renamed: false, pinned: false, pid: null,
+        ts: now - 20 * day, messages: [{ role: "user", text: "Old banner order" }] },
+      { id: 902, title: "", renamed: false, pinned: false, pid: null,
+        ts: now - 2 * day, messages: [{ role: "user", text: "Midweek credit check" }] },
+      { id: 903, title: "", renamed: false, pinned: true, pid: null,
+        ts: now - 30 * day, messages: [{ role: "user", text: "Supplier pinned talk" }] },
+      { id: 904, title: "", renamed: false, pinned: false, pid: null,
+        ts: now, messages: [] },
+    ];
+    A.cur = 904;
+    A.messages = A.sessions[3].messages;
+    pw.renderSidebar();
+    const html = get("chat-recents").innerHTML;
+    const groups = html.indexOf(">Pinned<") !== -1 && html.indexOf(">Today<") !== -1 &&
+      html.indexOf(">Yesterday<") === -1 &&
+      html.indexOf(">Previous 7 days<") !== -1 && html.indexOf(">Older<") !== -1;
+    const seq = [903, 904, 902, 901].map((id) => html.indexOf('data-csid="' + id + '"'));
+    const ordered = seq.every((v, i, a) => v !== -1 && (i === 0 || a[i - 1] < v));
+    const activeRow = html.indexOf('class="chat-row active" data-crow="904"') !== -1;
+    const title = get("chat-title").textContent === "New chat";
+    return groups && ordered && activeRow && title;
+  });
+
+  await check(mode + ": new, switch and delete move between chats", () => {
+    const A = pw.AGENT;
+    A.messages.push({ role: "user", text: "Record 40 cash for banners" });
+    pw.saveAgent();
+    const withMsg = pw.activeSession();
+    const before = A.sessions.length;
+    pw.agentNewSession();
+    const fresh = pw.activeSession();
+    const created = A.sessions.length === before + 1 && fresh.id !== withMsg.id &&
+      fresh.messages.length === 0 && withMsg.messages.length === 1;
+    pw.agentSwitchSession(withMsg.id);
+    const restored = pw.activeSession().id === withMsg.id && pw.AGENT.messages.length === 1;
+    pw.agentDeleteSession(withMsg.id);
+    const dropped = !pw.agentSession(withMsg.id) &&
+      A.sessions.length === before && pw.activeSession().id !== withMsg.id;
+    A.sessions.slice().forEach((s) => pw.agentDeleteSession(s.id));
+    const lastOne = A.sessions.length === 1 && A.sessions[0].messages.length === 0 &&
+      pw.activeSession().id === A.sessions[0].id;
+    return created && restored && dropped && lastOne;
+  });
+
+  await check(mode + ": chats are titled from their own words", () => {
+    const s = pw.activeSession();
+    const untitled = pw.agentSessionTitle(s) === "New chat";
+    pw.AGENT.messages.push({
+      role: "user", text: "Please record the ribbon purchase for Main Shop today",
+    });
+    const auto = pw.agentSessionTitle(pw.activeSession());
+    const words = auto.split(/\s+/).filter(Boolean);
+    const okAuto = words.length >= 3 && words.length <= 6 &&
+      auto.toLowerCase().indexOf("please") === -1 &&
+      auto.toLowerCase().indexOf("ribbon") !== -1;
+    pw.agentRenameSession(s.id, "Ribbon restock");
+    const renamed = pw.agentSessionTitle(pw.activeSession()) === "Ribbon restock";
+    pw.agentRenameSession(s.id, "");
+    const backToWords = pw.agentSessionTitle(pw.activeSession()) === auto;
+    return untitled && okAuto && renamed && backToWords;
+  });
+
+  await check(mode + ": search reads titles and every word inside", () => {
+    const A = pw.AGENT;
+    A.sessions = [
+      { id: 911, title: "", renamed: false, pinned: false, pid: null, ts: Date.now(),
+        messages: [{ role: "user", text: "The zebra supplier invoice is late" }] },
+      { id: 912, title: "", renamed: false, pinned: false, pid: null, ts: Date.now(),
+        messages: [{ role: "user", text: "Nothing to see here" }] },
+    ];
+    A.cur = 911;
+    A.messages = A.sessions[0].messages;
+    const inp = get("chat-search");
+    inp.value = "zebra";
+    inp.dispatch("input");
+    const hit = get("chat-recents").innerHTML;
+    const byText = hit.indexOf('data-csid="911"') !== -1 &&
+      hit.indexOf('data-csid="912"') === -1 &&
+      hit.indexOf("chat-row-sn") !== -1 && hit.indexOf("supplier") !== -1;
+    A.sessions[1].title = "Monthly zebra report";
+    A.sessions[1].renamed = true;
+    pw.renderSidebar();
+    const byTitle = get("chat-recents").innerHTML.indexOf('data-csid="912"') !== -1;
+    inp.value = "";
+    inp.dispatch("input");
+    const cleared = get("chat-recents").innerHTML.indexOf('data-csid="911"') !== -1 &&
+      get("chat-recents").innerHTML.indexOf('data-csid="912"') !== -1;
+    return byText && byTitle && cleared;
+  });
+
+  await check(mode + ": projects hold chats and filter the sidebar", () => {
+    const p = pw.agentAddProject("Restock");
+    pw.agentMoveSession(911, p.id);
+    const shown = get("chat-projects").innerHTML.indexOf("Restock") !== -1 &&
+      pw.agentSession(911).pid === p.id;
+    const clickProj = { target: { getAttribute: (k) => (k === "data-cproj" ? String(p.id) : null) } };
+    get("chat-projects").dispatch("click", clickProj);
+    const filtered = get("chat-recents").innerHTML.indexOf('data-csid="911"') !== -1 &&
+      get("chat-recents").innerHTML.indexOf('data-csid="912"') === -1;
+    get("chat-projects").dispatch("click", clickProj);
+    const toggled = get("chat-recents").innerHTML.indexOf('data-csid="912"') !== -1;
+    pw.agentDeleteProject(p.id);
+    const freed = pw.agentSession(911).pid === null &&
+      get("chat-projects").innerHTML.indexOf("Restock") === -1;
+    return shown && filtered && toggled && freed;
+  });
+
+  await check(mode + ": a chat's ⋯ menu pins, moves and deletes", () => {
+    const A = pw.AGENT;
+    A.sessions = [
+      { id: 921, title: "", renamed: false, pinned: false, pid: null, ts: Date.now(),
+        messages: [{ role: "user", text: "Talk to the powder supplier" }] },
+      { id: 922, title: "", renamed: false, pinned: false, pid: null,
+        ts: Date.now() - 1000, messages: [] },
+    ];
+    A.cur = 921;
+    A.messages = A.sessions[0].messages;
+    pw.renderSidebar();
+    const recents = get("chat-recents"), menu = get("chat-row-menu");
+    const open = (id) => recents.dispatch("click", {
+      target: { getAttribute: (k) => (k === "data-cmenu" ? String(id) : null) },
+    });
+    const act = (a) => menu.dispatch("click", {
+      target: { getAttribute: (k) => (k === "data-ract" ? a : null) },
+    });
+    open(921);
+    const opened = !menu.classList.contains("hidden") &&
+      menu.innerHTML.indexOf("Rename") !== -1 && menu.innerHTML.indexOf("Delete") !== -1;
+    act("pin");
+    const pinned = pw.agentSession(921).pinned === true &&
+      menu.classList.contains("hidden") &&
+      get("chat-recents").innerHTML.indexOf(">Pinned<") !== -1;
+    open(921);
+    act("move");
+    const moveMode = menu.innerHTML.indexOf("Back") !== -1;
+    act("back");
+    const backMode = menu.innerHTML.indexOf("Rename") !== -1;
+    act("delete");
+    const deleted = !pw.agentSession(921) && menu.classList.contains("hidden");
+    recents.dispatch("click", {
+      target: { getAttribute: (k) => (k === "data-csid" ? "922" : null) },
+    });
+    const switched = pw.activeSession().id === 922;
+    return opened && pinned && moveMode && backMode && deleted && switched;
+  });
+
+  await check(mode + ": a card waiting in another chat still lights the badge", () => {
+    const A = pw.AGENT;
+    A.sessions = [
+      { id: 931, title: "", renamed: false, pinned: false, pid: null, ts: Date.now() - 1000,
+        messages: [{ role: "assistant", text: "Proposal.", mid: 1, cards: [
+          { type: "ask", risk: "write", status: "pending", aid: 99301,
+            tool: "create_purchase", lines: ["40 · Banners"] }] }] },
+      { id: 932, title: "", renamed: false, pinned: false, pid: null, ts: Date.now(), messages: [] },
+    ];
+    A.cur = 932;
+    A.messages = A.sessions[1].messages;
+    // the badge is only lit when a model is attached — attach one, then leave clean
+    get("ai-provider").value = "custom";
+    get("ai-base").value = "http://127.0.0.1:9/v1";
+    get("ai-key").value = "sk-test-badge";
+    get("ai-model").value = "test-model";
+    get("ai-form").dispatch("submit");
+    pw.renderAgentStatus();
+    const fab = get("agent-fab").className.indexOf("pending") !== -1;
+    const pill = get("agent-status").textContent.indexOf("waiting") !== -1;
+    get("ai-key").value = "";
+    get("ai-form").dispatch("submit");
+    pw.renderAgentStatus();
+    // detaching the model takes the pill back to its words, but the card
+    // still waits — approving is local, so the badge stays lit
+    const detached = get("agent-status").textContent.indexOf("no model attached") !== -1 &&
+      get("agent-fab").className.indexOf("pending") !== -1;
+    return fab && pill && detached;
   });
 
   await check(mode + ": the agent's hands follow the coverage switch", () => {

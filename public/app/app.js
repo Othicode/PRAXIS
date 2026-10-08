@@ -1266,7 +1266,7 @@ async function switchView(view) {
     else if (view === "credits") await loadCredits();
     else if (view === "analytics") await loadAnalytics();
     else if (view === "budget") await loadBudget();
-    else if (view === "chat") { syncChatUser(); renderAgent(); showChatPane(CHAT_PANE); }
+    else if (view === "chat") { syncChatUser(); renderAgent(); renderSidebar(); showChatPane(CHAT_PANE); }
     else await loadBranches();
   } catch (err) { toast(err.message, "err"); }
 }
@@ -1835,8 +1835,14 @@ const AGENT_STORE = "pwbudget.agent.v1";
 const AGENT_TURNS = 3;      // model turns allowed per user message
 const AGENT_GAP = 1200;     // ms between model calls — free tiers are metered
 const AGENT_JOURNAL_MAX = 120;
+const AGENT_SESSION_MAX = 20;
 
-let AGENT = { messages: [], journal: [], voice: false, seq: 1, jseq: 1 };
+/* A flat conversation became a list of them: every reload archives the chat
+   that was open and starts an empty one, the sidebar holds the rest. */
+let AGENT = {
+  sessions: [], cur: 0, projects: [],
+  messages: [], journal: [], voice: false, seq: 1, jseq: 1, ui: {},
+};
 let AGENT_BUSY = false;
 let AGENT_LAST_CALL = 0;
 const AGENT_FILES = {};     // generated reports: fid -> {name, mime, bytes}
@@ -1950,29 +1956,73 @@ function loadAgent() {
     const o = raw ? JSON.parse(raw) : null;
     if (o && typeof o === "object") {
       AGENT = {
-        messages: Array.isArray(o.messages) ? o.messages : [],
+        sessions: Array.isArray(o.sessions)
+          ? o.sessions.map(agentNormSession).filter(Boolean) : null,
+        cur: Number(o.cur) || 0,
+        projects: Array.isArray(o.projects)
+          ? o.projects.filter((p) => p && typeof p === "object")
+              .map((p) => ({ id: Number(p.id) || 0,
+                             name: String(p.name || "Project").slice(0, 60),
+                             ts: Number(p.ts) || Date.now() }))
+              .filter((p) => p.id)
+          : [],
+        messages: [],
         journal: Array.isArray(o.journal) ? o.journal : [],
         voice: !!o.voice,
         seq: Number(o.seq) || 1,
         jseq: Number(o.jseq) || 1,
+        ui: o.ui && typeof o.ui === "object" ? { collapsed: !!o.ui.collapsed } : {},
       };
-      // A generated file lives only in memory; on reload its card is a promise
-      // that has to be made again rather than a lie.
-      AGENT.messages.forEach((m) => (m.cards || []).forEach((c) => {
+      // v1 shipped one flat conversation — it becomes a single session.
+      if (!AGENT.sessions) {
+        AGENT.sessions = [{
+          id: 1, title: "", renamed: false, pinned: false, pid: null, ts: Date.now(),
+          messages: Array.isArray(o.messages) ? o.messages : [],
+        }];
+      }
+      if (!AGENT.sessions.length) AGENT.sessions = [agentFreshSession()];
+      if (!AGENT.sessions.some((s) => s.id === AGENT.cur)) AGENT.cur = AGENT.sessions[0].id;
+      /* A generated file lives only in memory; on reload its card is a promise
+         that has to be made again rather than a lie. */
+      AGENT.sessions.forEach((s) => s.messages.forEach((m) => (m.cards || []).forEach((c) => {
         if (c.type === "file") c.stale = !AGENT_FILES[c.fid];
-      }));
+      })));
+      const active = agentSession(AGENT.cur) || AGENT.sessions[0];
+      AGENT.messages = active.messages;
+      /* Every page load is a new chat. The conversation that was open is
+         archived under the sidebar — kept in full, titled from its own words
+         when it had no name — and an empty one takes its place. */
+      if (active.messages.length) {
+        const fresh = agentFreshSession();
+        AGENT.sessions.push(fresh);
+        AGENT.cur = fresh.id;
+        AGENT.messages = fresh.messages;
+        saveAgent();
+      }
+    } else if (!AGENT.sessions.length) {
+      AGENT.sessions = [agentFreshSession()];
+      AGENT.cur = AGENT.sessions[0].id;
+      AGENT.messages = AGENT.sessions[0].messages;
     }
   } catch (e) { /* private mode: start empty */ }
 }
 
 function saveAgent() {
   capAgentHistory();
+  capSessions();
+  const active = agentSession(AGENT.cur);
+  /* The thread is held in two places on purpose: tests and tools poke
+     AGENT.messages directly, so write it back onto the session it belongs
+     to before anything is persisted. */
+  if (active && active.messages !== AGENT.messages) active.messages = AGENT.messages;
   try {
     localStorage.setItem(AGENT_STORE, JSON.stringify({
-      messages: AGENT.messages, journal: AGENT.journal, voice: AGENT.voice,
-      seq: AGENT.seq, jseq: AGENT.jseq,
+      sessions: AGENT.sessions, cur: AGENT.cur, projects: AGENT.projects,
+      journal: AGENT.journal, voice: AGENT.voice,
+      seq: AGENT.seq, jseq: AGENT.jseq, ui: AGENT.ui,
     }));
   } catch (e) { /* quota */ }
+  renderSidebar();
 }
 
 /* The conversation lives on this device and grows faster than anything else
@@ -1997,6 +2047,170 @@ function capAgentHistory() {
       return false;
     });
   }
+}
+
+/* Chats compete for the same localStorage quota as everything else. Keep the
+   newest, keep the pinned, never drop the one that is open. */
+function capSessions() {
+  if (AGENT.sessions.length <= AGENT_SESSION_MAX) return;
+  const droppable = AGENT.sessions
+    .filter((s) => s.id !== AGENT.cur && !s.pinned)
+    .sort((a, b) => a.ts - b.ts);
+  let over = AGENT.sessions.length - AGENT_SESSION_MAX;
+  for (const s of droppable) {
+    if (over <= 0) break;
+    AGENT.sessions.splice(AGENT.sessions.indexOf(s), 1);
+    over--;
+  }
+}
+
+/* ---------- sessions ---------- */
+function agentNormSession(s, i) {
+  if (!s || typeof s !== "object") return null;
+  return {
+    id: Number(s.id) || (Date.now() + i),
+    title: typeof s.title === "string" ? s.title : "",
+    renamed: !!s.renamed,
+    pinned: !!s.pinned,
+    pid: s.pid === null || s.pid === undefined || s.pid === "" ? null : Number(s.pid),
+    ts: Number(s.ts) || Date.now(),
+    messages: Array.isArray(s.messages) ? s.messages : [],
+  };
+}
+
+function agentSession(id) {
+  return AGENT.sessions.find((s) => s.id === id) || null;
+}
+
+function activeSession() {
+  return agentSession(AGENT.cur) || AGENT.sessions[0] || null;
+}
+
+function agentFreshSession() {
+  let id = Date.now();
+  while (agentSession(id)) id++;
+  return { id, title: "", renamed: false, pinned: false, pid: null, ts: id, messages: [] };
+}
+
+/* Titles come from the owner's own words: the first message's significant
+   words, more only when that alone has nothing to give. Renaming pins a name
+   for good. */
+const AGENT_STOP = ("a an the and or but if so to of in on at for with from by as is are was were be been "
+  + "do does did this that it its i we you they he she my our your their me us them "
+  + "please can could would should will shall may might just now today yesterday tomorrow "
+  + "what which who whom how much many some any all get got give show tell let need want "
+  + "there here when while about into over under after before again more less very not no yes").split(/\s+/);
+
+function agentTitleWords(text) {
+  return String(text || "").replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/)
+    .filter((w) => w && AGENT_STOP.indexOf(w.toLowerCase()) === -1);
+}
+
+function agentAutoTitle(messages) {
+  const ums = (messages || []).filter((m) => m && m.role === "user" && m.text);
+  if (!ums.length) {
+    const any = (messages || []).find((m) => m && m.text && m.role !== "system");
+    return agentTitleWords(any ? any.text : "").slice(0, 6).join(" ");
+  }
+  let words = agentTitleWords(ums[0].text);
+  for (let i = 1; i < ums.length && words.length < 3; i++) {
+    words = words.concat(agentTitleWords(ums[i].text));
+  }
+  return words.slice(0, 6).join(" ");
+}
+
+function agentSessionTitle(s) {
+  if (!s) return "New chat";
+  if (s.renamed && s.title) return s.title;
+  return agentAutoTitle(s.messages) || "New chat";
+}
+
+function agentNewSession() {
+  const cur = activeSession();
+  if (cur && !cur.messages.length) {   // an empty chat already is new
+    AGENT.cur = cur.id;
+    AGENT.messages = cur.messages;
+    renderSidebar();
+    return cur;
+  }
+  const s = agentFreshSession();
+  AGENT.sessions.push(s);
+  AGENT.cur = s.id;
+  AGENT.messages = s.messages;
+  saveAgent();
+  renderAgent();
+  return s;
+}
+
+function agentSwitchSession(id) {
+  const s = agentSession(id);
+  if (!s) return;
+  AGENT.cur = s.id;
+  AGENT.messages = s.messages;
+  showChatPane("chats");
+  saveAgent();
+  renderAgent();
+  if (!s.messages.length) agentBriefing();
+}
+
+function agentDeleteSession(id) {
+  const i = AGENT.sessions.findIndex((s) => s.id === id);
+  if (i === -1) return;
+  const wasActive = AGENT.cur === id;
+  AGENT.sessions.splice(i, 1);
+  if (!AGENT.sessions.length) AGENT.sessions = [agentFreshSession()];
+  if (wasActive) {
+    const next = activeSession();
+    AGENT.cur = next.id;
+    AGENT.messages = next.messages;
+    renderAgent();
+  }
+  saveAgent();
+}
+
+function agentRenameSession(id, title) {
+  const s = agentSession(id);
+  if (!s) return;
+  s.title = String(title || "").trim().slice(0, 80);
+  s.renamed = !!s.title;
+  saveAgent();
+}
+
+function agentTogglePin(id) {
+  const s = agentSession(id);
+  if (!s) return;
+  s.pinned = !s.pinned;
+  saveAgent();
+}
+
+function agentMoveSession(id, pid) {
+  const s = agentSession(id);
+  if (!s) return;
+  s.pid = pid ? Number(pid) : null;
+  saveAgent();
+}
+
+function agentAddProject(name) {
+  const n = String(name || "").trim().slice(0, 60);
+  if (!n) return null;
+  const p = { id: Date.now(), name: n, ts: Date.now() };
+  while (agentProject(p.id)) p.id++;
+  AGENT.projects.unshift(p);
+  saveAgent();
+  return p;
+}
+
+function agentProject(id) {
+  return AGENT.projects.find((p) => p.id === id) || null;
+}
+
+function agentDeleteProject(id) {
+  const i = AGENT.projects.findIndex((p) => p.id === id);
+  if (i === -1) return;
+  AGENT.projects.splice(i, 1);
+  AGENT.sessions.forEach((s) => { if (s.pid === id) s.pid = null; });
+  if (PROJ_FILTER === id) PROJ_FILTER = null;
+  saveAgent();
 }
 
 /* ---------- rendering ---------- */
@@ -2158,21 +2372,28 @@ function renderAgentStatus() {
   const el = $("#agent-status");
   if (!el) return;
   const s = aiStatus();
-  const reach = agentTools().map((t) => t.risk).filter((v, i, a) => a.indexOf(v) === i);
   const pill = $("#agent-pill");
   if (pill) pill.classList.toggle("on", aiConfigured());
-  if (!aiConfigured()) { el.textContent = "no model attached"; return; }
-  const pend = AGENT.messages.reduce((n, m) =>
+  // Cards wait in whichever chat they were left — count every session, and
+  // light the badge even with no model attached: approving is a local act.
+  const msgs = AGENT.sessions.length
+    ? AGENT.sessions.reduce((a, s) => a.concat(s.messages), []) : AGENT.messages;
+  const pend = msgs.reduce((n, m) =>
     n + (m.cards || []).filter((c) => c.type === "ask" && c.status === "pending").length, 0);
+  const fab = $("#agent-fab");
+  if (fab) fab.className = "agent-fab" + (pend ? " pending" : "");
+  const chatNav = document.querySelector('.nav-btn[data-view="chat"]');
+  if (chatNav) chatNav.classList.toggle("pending", !!pend);
+  if (!aiConfigured()) {
+    el.textContent = "no model attached" + (pend ? ` · ${pend} waiting on you` : "");
+    return;
+  }
+  const reach = agentTools().map((t) => t.risk).filter((v, i, a) => a.indexOf(v) === i);
   const bits = [`${reach.length ? "can " + reach.join("/") : "reads only"}`];
   const locked = agentLocked().length;
   if (locked) bits.push(`${locked} locked by coverage`);
   if (AI_LAST_ERROR) bits.push("problem");
   el.textContent = bits.join(" · ") + (pend ? ` · ${pend} waiting on you` : "");
-  const fab = $("#agent-fab");
-  if (fab) fab.className = "agent-fab" + (pend ? " pending" : "");
-  const chatNav = document.querySelector('.nav-btn[data-view="chat"]');
-  if (chatNav) chatNav.classList.toggle("pending", !!pend);
 }
 
 /* The assistant is an app section now: opening it is switching to the chat
@@ -2194,6 +2415,9 @@ function toggleChatSidebar(force) {
   } else {
     const open = force === undefined ? layout.classList.contains("collapsed") : !force;
     layout.classList.toggle("collapsed", !open);
+    AGENT.ui = AGENT.ui || {};
+    AGENT.ui.collapsed = !open;
+    saveAgent();
   }
 }
 
@@ -2216,6 +2440,176 @@ function syncChatUser() {
   const pn = $("#profile-name"), pa = $("#profile-avatar");
   if (n && pn && pn.textContent) n.textContent = pn.textContent;
   if (a && pa && pa.textContent) a.textContent = pa.textContent;
+}
+
+/* ---------- sidebar: chat list, projects, search ---------- */
+let CHAT_SEARCH = "";   // live query over titles and every word inside them
+let PROJ_FILTER = null; // project row highlighted in the sidebar
+let ROW_MENU = null;    // { sid, mode: "actions"|"move" } while a ⋯ menu is open
+
+/* Works for real nodes (closest) and harness fakes (direct getAttribute). */
+function closestAttr(el, name) {
+  if (!el) return null;
+  if (el.closest) {
+    const c = el.closest(`[${name}]`);
+    if (c && c.getAttribute) { const v = c.getAttribute(name); if (v) return v; }
+  }
+  if (el.getAttribute) { const v = el.getAttribute(name); if (v) return v; }
+  return null;
+}
+
+function agentSessionMatches(s, q) {
+  if (agentSessionTitle(s).toLowerCase().indexOf(q) !== -1) return true;
+  return s.messages.some((m) => m && m.text && String(m.text).toLowerCase().indexOf(q) !== -1);
+}
+
+function agentSessionSnippet(s, q) {
+  for (const m of s.messages) {
+    if (!m || !m.text) continue;
+    const t = String(m.text);
+    const i = t.toLowerCase().indexOf(q);
+    if (i === -1) continue;
+    const from = Math.max(0, i - 24);
+    return (from ? "…" : "") + t.slice(from, from + 72).trim()
+      + (from + 72 < t.length ? "…" : "");
+  }
+  return "";
+}
+
+function agentBuckets(list) {
+  const now = new Date();
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const y = startToday - 86400000;
+  const w = startToday - 7 * 86400000;
+  const g = { Pinned: [], Today: [], Yesterday: [], "Previous 7 days": [], Older: [] };
+  for (const s of list) {
+    if (s.pinned) g.Pinned.push(s);
+    else if (s.ts >= startToday) g.Today.push(s);
+    else if (s.ts >= y) g.Yesterday.push(s);
+    else if (s.ts >= w) g["Previous 7 days"].push(s);
+    else g.Older.push(s);
+  }
+  return g;
+}
+
+function agentChatRow(s) {
+  const q = CHAT_SEARCH.trim().toLowerCase();
+  return `<div class="chat-row${s.id === AGENT.cur ? " active" : ""}${s.pinned ? " pinned" : ""}" data-crow="${s.id}">
+      <button type="button" class="chat-row-main" data-csid="${s.id}">
+        <span class="chat-row-t">${esc(agentSessionTitle(s))}${s.pinned ? '<span class="chat-row-pin" title="Pinned">★</span>' : ""}</span>
+        ${q ? `<small class="chat-row-sn">${esc(agentSessionSnippet(s, q))}</small>` : ""}
+      </button>
+      <button type="button" class="chat-row-more" data-cmenu="${s.id}" aria-label="Chat options">⋯</button>
+    </div>`;
+}
+
+function renderSidebar() {
+  const layout = $("#chat-layout");
+  if (layout) layout.classList.toggle("collapsed", !!AGENT.ui.collapsed);
+  const title = $("#chat-title");
+  if (title) title.textContent = agentSessionTitle(activeSession());
+  const projs = $("#chat-projects");
+  if (projs) {
+    projs.innerHTML = AGENT.projects.length
+      ? AGENT.projects.map((p) =>
+          `<div class="chat-proj${PROJ_FILTER === p.id ? " on" : ""}" data-cproj="${p.id}">
+             <span>${esc(p.name)}</span>
+             <button type="button" class="chat-proj-x" data-cprojdel="${p.id}" aria-label="Delete project">✕</button>
+           </div>`).join("")
+      : `<p class="chat-sec-empty">No projects yet.</p>`;
+  }
+  const recents = $("#chat-recents");
+  if (recents) {
+    const q = CHAT_SEARCH.trim().toLowerCase();
+    let list = AGENT.sessions.slice();
+    if (q) list = list.filter((s) => agentSessionMatches(s, q));
+    else if (PROJ_FILTER) list = list.filter((s) => s.pid === PROJ_FILTER);
+    list.sort((a, b) => b.ts - a.ts);
+    let html = "";
+    if (!list.length) {
+      html = `<p class="chat-sec-empty">${q ? "No chats match." : "Your conversations appear here."}</p>`;
+    } else if (q) {
+      html = `<div class="chat-grp"><div class="chat-grp-h">Results</div>${list.map(agentChatRow).join("")}</div>`;
+    } else {
+      const g = agentBuckets(list);
+      html = ["Pinned", "Today", "Yesterday", "Previous 7 days", "Older"]
+        .filter((k) => g[k].length)
+        .map((k) => `<div class="chat-grp"><div class="chat-grp-h">${k}</div>${g[k].map(agentChatRow).join("")}</div>`)
+        .join("");
+    }
+    recents.innerHTML = html;
+  }
+}
+
+/* One shared popover for every row's ⋯ — rename, move, pin, delete. */
+function openRowMenu(sid, anchor) {
+  const m = $("#chat-row-menu");
+  if (!m || !agentSession(sid)) return;
+  ROW_MENU = { sid, mode: "actions" };
+  renderRowMenu();
+  m.classList.remove("hidden");
+  if (anchor && anchor.getBoundingClientRect && m.style) {
+    const r = anchor.getBoundingClientRect();
+    if (r && typeof r.bottom === "number") m.style.top = Math.max(4, r.bottom + 4) + "px";
+    if (r && typeof r.right === "number" && window.innerWidth)
+      m.style.right = Math.max(4, window.innerWidth - r.right) + "px";
+  }
+}
+
+function renderRowMenu() {
+  const m = $("#chat-row-menu");
+  const s = ROW_MENU ? agentSession(ROW_MENU.sid) : null;
+  if (!m || !s) return;
+  if (ROW_MENU.mode === "move") {
+    m.innerHTML = `<button type="button" data-ract="back" role="menuitem">← Back</button>`
+      + `<button type="button" data-ract="setproj" data-rpid="" role="menuitem">${s.pid ? "No project" : "✓ No project"}</button>`
+      + AGENT.projects.map((p) =>
+          `<button type="button" data-ract="setproj" data-rpid="${p.id}" role="menuitem">${s.pid === p.id ? "✓ " : ""}${esc(p.name)}</button>`).join("");
+  } else {
+    m.innerHTML = `<button type="button" data-ract="rename" role="menuitem">✎ Rename</button>`
+      + `<button type="button" data-ract="move" role="menuitem">📁 Move to project</button>`
+      + `<button type="button" data-ract="pin" role="menuitem">${s.pinned ? "☆ Unpin" : "★ Pin"}</button>`
+      + `<button type="button" data-ract="delete" class="danger" role="menuitem">🗑 Delete</button>`;
+  }
+}
+
+function closeRowMenu() {
+  const m = $("#chat-row-menu");
+  if (m) m.classList.add("hidden");
+  ROW_MENU = null;
+}
+
+function runRowMenuAction(t) {
+  if (!ROW_MENU) return;
+  const act = closestAttr(t, "data-ract");
+  if (!act) return;
+  if (act === "back") { ROW_MENU.mode = "actions"; renderRowMenu(); return; }
+  if (act === "rename") {
+    const s = agentSession(ROW_MENU.sid);
+    const v = typeof prompt === "function"
+      ? prompt("Rename chat", s ? agentSessionTitle(s) : "") : null;
+    if (v !== null && v !== undefined) agentRenameSession(ROW_MENU.sid, v);
+    closeRowMenu();
+    return;
+  }
+  if (act === "move") { ROW_MENU.mode = "move"; renderRowMenu(); return; }
+  if (act === "setproj") {
+    agentMoveSession(ROW_MENU.sid, closestAttr(t, "data-rpid"));
+    closeRowMenu();
+    return;
+  }
+  if (act === "pin") {
+    agentTogglePin(ROW_MENU.sid);
+    closeRowMenu();
+    return;
+  }
+  if (act === "delete") {
+    const s = agentSession(ROW_MENU.sid);
+    const ok = typeof confirm === "undefined"
+      || confirm(`Delete "${s ? agentSessionTitle(s) : "chat"}"? This cannot be undone.`);
+    if (ok) agentDeleteSession(ROW_MENU.sid);
+    closeRowMenu();
+  }
 }
 
 function agentOpen() {
@@ -2245,7 +2639,9 @@ async function agentContext() {
   if (alerts.length)
     bits.push("Reminders: " + alerts.slice(0, 3).map((x) => x.title).join("; ") + ".");
   else bits.push("Reminders: nothing needs attention.");
-  const pending = AGENT.messages.reduce((n, m) =>
+  const ctxMsgs = AGENT.sessions.length
+    ? AGENT.sessions.reduce((a, s) => a.concat(s.messages), []) : AGENT.messages;
+  const pending = ctxMsgs.reduce((n, m) =>
     n + (m.cards || []).filter((c) => c.type === "ask" && c.status === "pending").length, 0);
   if (pending) bits.push(`${pending} proposal(s) are waiting for the owner to approve.`);
   if (AGENT.journal.length) {
@@ -2435,6 +2831,8 @@ async function agentSend(text) {
   const t = String(text || "").trim();
   if (!t || AGENT_BUSY) return;
   AGENT.messages.push({ role: "user", text: t, mid: AGENT.seq++ });
+  const sess = activeSession();
+  if (sess) sess.ts = Date.now();       // sending is activity: bump it up the list
   const input = $("#agent-input");
   if (input) input.value = "";
   saveAgent();
@@ -4454,6 +4852,68 @@ function bindAll() {
   document.addEventListener("click", () => {
     const m = $("#chat-user-menu");
     if (m && !m.classList.contains("hidden")) m.classList.add("hidden");
+    closeRowMenu();
+  });
+  if (window.addEventListener) {
+    window.addEventListener("beforeunload", () => saveAgent());
+  }
+
+  /* --- chats: new, search, rows, projects, the row menu --- */
+  const chatNew = $("#chat-new");
+  if (chatNew) chatNew.addEventListener("click", () => {
+    agentNewSession();
+    showChatPane("chats");
+    const i = $("#agent-input");
+    if (i && i.focus) i.focus();
+  });
+  const chatSearch = $("#chat-search");
+  if (chatSearch) chatSearch.addEventListener("input", () => {
+    CHAT_SEARCH = chatSearch.value || "";
+    renderSidebar();
+  });
+  const chatRecents = $("#chat-recents");
+  if (chatRecents) chatRecents.addEventListener("click", (e) => {
+    const t = e.target;
+    const menuId = closestAttr(t, "data-cmenu");
+    if (menuId) {
+      if (e.stopPropagation) e.stopPropagation();
+      openRowMenu(Number(menuId), t);
+      return;
+    }
+    const sid = closestAttr(t, "data-csid");
+    if (sid) {
+      agentSwitchSession(Number(sid));
+      if (isMobileChat()) toggleChatSidebar(false);
+    }
+  });
+  const chatRowMenu = $("#chat-row-menu");
+  if (chatRowMenu) chatRowMenu.addEventListener("click", (e) => {
+    if (e.stopPropagation) e.stopPropagation();
+    runRowMenuAction(e.target);
+  });
+  const chatProjects = $("#chat-projects");
+  if (chatProjects) chatProjects.addEventListener("click", (e) => {
+    const del = closestAttr(e.target, "data-cprojdel");
+    if (del) {
+      if (e.stopPropagation) e.stopPropagation();
+      if (typeof confirm === "undefined"
+          || confirm("Delete this project? Its chats stay.")) {
+        agentDeleteProject(Number(del));
+      }
+      return;
+    }
+    const pid = closestAttr(e.target, "data-cproj");
+    if (pid) {
+      PROJ_FILTER = PROJ_FILTER === Number(pid) ? null : Number(pid);
+      renderSidebar();
+    }
+  });
+  const chatNewProject = $("#chat-new-project");
+  if (chatNewProject) chatNewProject.addEventListener("click", (e) => {
+    if (e.stopPropagation) e.stopPropagation();
+    if (typeof prompt !== "function") return;
+    const name = prompt("New project name", "");
+    if (name && name.trim()) agentAddProject(name.trim());
   });
   const agentMicBtn = $("#agent-mic");
   if (agentMicBtn) agentMicBtn.addEventListener("click", agentMic);

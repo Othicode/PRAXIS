@@ -361,9 +361,15 @@ setTimeout(function () {
           <button type="button" class="chat-link" data-clink="projects">📁 Projects</button>
           <button type="button" class="chat-link" data-clink="logs">🕑 Logs</button>
         </nav>
+        <div class="chat-actions">
+          <button type="button" class="btn primary chat-new" id="chat-new">＋ New chat</button>
+          <div class="chat-search">
+            <input type="search" id="chat-search" placeholder="Search chats" aria-label="Search chats" maxlength="80" autocomplete="off">
+          </div>
+        </div>
         <div class="chat-side-scroll" id="chat-side-scroll">
           <section class="chat-sec" id="chat-projects-sec">
-            <div class="chat-sec-head"><b>Projects</b></div>
+            <div class="chat-sec-head"><b>Projects</b><button type="button" class="chat-sec-add" id="chat-new-project" aria-label="New project" title="New project">＋</button></div>
             <div class="chat-sec-body" id="chat-projects"><p class="chat-sec-empty">No projects yet.</p></div>
           </section>
           <section class="chat-sec" id="chat-recents-sec">
@@ -383,6 +389,7 @@ setTimeout(function () {
             <button type="button" data-umenu="theme" role="menuitem">🌗 Theme</button>
           </div>
         </div>
+        <div class="chat-menu chat-row-menu hidden" id="chat-row-menu" role="menu"></div>
       </aside>
       <div class="chat-main">
         <header class="chat-topbar">
