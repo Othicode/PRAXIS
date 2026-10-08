@@ -56,19 +56,26 @@ contract, so nothing in the UI changes.
   of the app the model may reach. Turn *Receipt & slip capture* off and the
   scan bar disappears; turn *My items & suppliers* off and your catalogue
   stops travelling with a scan.
-- **💬 The assistant** — a chat bubble on every screen (top bar 🤖) that
-  opens as a **glass drawer**: a dimmed backdrop, then a full sheet on the
-  phone or a floating card on the right of a wide screen. It
-  answers from *your* books: what you spent this month, what you owe, price
-  moves, top suppliers, reminders, a PDF report on request, even "open the
-  Credits screen". It opens with a **briefing** — where the shop stands right
-  now, keyless — and after each answer offers one-tap **follow-up** chips. It
-  is honest about its hands: a tool your coverage has switched off is shown as
-  `[locked]` in its instructions, so it will offer *propose widening access*
-  instead of pretending. Writes — recording a pasted slip, taking a backup,
-  flipping a coverage switch, building a file — always arrive as a card with
-  an **Approve** tap (or **Approve all** for a batch); nothing is written by
-  itself, and a model that cannot be reached says so with **Try again**
+- **💬 The assistant** — a full **two-column chat view** (top bar 🤖, or the
+  Assistant pill in the nav): a sidebar on the left, the conversation on the
+  right. The sidebar holds **＋ New chat**, a **search box** that reads titles
+  and every word inside your chats, **Recents** grouped by day (Pinned /
+  Today / Yesterday / Previous 7 days / Older) with a per-chat ⋯ menu —
+  rename, move to project, pin, delete — **Projects** you can create and
+  click to filter, the **Logs** (the change log lives here now), and your
+  shop identity with Settings / Your data / Theme. **Every page reload
+  starts a fresh chat**: the one you were in is archived under its own
+  keyword title (renames stick) — visits stay, nothing is lost. The engine
+  is unchanged and answers from *your* books: what you spent this month,
+  what you owe, price moves, top suppliers, reminders, a PDF report on
+  request, even "open the Credits screen". It opens with a **briefing**,
+  offers one-tap **follow-up** chips, is honest about its hands (a
+  coverage-off tool is `[locked]`, never hidden), and every write —
+  recording purchases, taking a backup, flipping a coverage switch,
+  building a file — arrives as an **Approve** card, with **Approve all N**
+  when a reply carries a whole batch (up to 40 rows, numbered *3 of 12*).
+  A pending card lights the badge on the nav pill and the floating button
+  from any chat; a model that cannot be reached says so with **Try again**
   instead of going quiet.
 - **🎤 Speak to the app** — a floating microphone (bottom-left, or
   Ctrl+Shift+Space) opens a **voice overlay**: say or type a budget change in
@@ -380,7 +387,17 @@ chips, a failed turn offering *Try again*, one pasted slip expanding into one
 pending card per line, a requested backup arriving as a file, **Approve all**
 recording several rows in one tap, the history cap keeping a waiting card,
 the new read tools answering, `navigate` opening a view, a month-scoped
-report, and the harness's own exports — then the **voice overlay**: the
+report, and the harness's own exports — then the **chat view**: the
+assistant opening as its own two-column view with a live thread, the
+change log living inside it, the sidebar collapsing, the user menu
+answering, a reload archiving the open chat under a keyword title and
+starting a fresh one (v1 storage migrating in place, no litter on
+repeat reloads), day groups and pins ordering the sidebar, new / switch /
+delete moving between chats, search reading titles and message text,
+projects filtering the list, a chat's ⋯ menu pinning and deleting, the
+pending badge lighting across sessions, a whole restock arriving as
+numbered cards capped at 40 with **Approve all 12**, and a reply ending
+in stray digits still parsing — then the **voice overlay**: the
 multilingual number engine and strict batch validator, a chip applying a
 budget change (set total → add → update → delete) with one-step *↩ Undo*
 back to where it started, the coverage gate blocking and then releasing the

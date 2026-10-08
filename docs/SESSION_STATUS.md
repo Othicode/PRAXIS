@@ -46,13 +46,19 @@ Constraints that are **not negotiable** (they break tests if violated):
 Run from the repo root:
 
 ```
-node smoke_test.js          -> 275 passed, 0 failed
+node smoke_test.js          -> 301 passed, 0 failed
 node audit_calculations.js  -> 174 passed, 0 failed (13 shared constants)
-python tools/cleanup_smoke.py   -> clean (branches: Main Shop; purchases: 0)
+python tools/cleanup_smoke.py   -> clean (branches: Main Shop; smoke debris removed —
+                                   the owner's own purchases are real data and stay)
 python tools/check_static.py    -> OK
 ```
 
 Notes:
+
+- The smoke **boot check tolerates real purchases** (it fails only on rows
+  carrying a smoke stamp or a smoke fixture's name): a ledger that records
+  daily can never be empty again, and 280 other checks pass with the owner's
+  rows present.
 
 - `smoke_test.js` does **not** start a server. Start one first:
   `python server.py 8123`, and run `python tools/cleanup_smoke.py` after.
@@ -388,6 +394,62 @@ renders what happened"* asserts `!html.includes("undone")`.
 
 ---
 
+### Chat view — two-column shell, sessions, bulk cards ✅ (this session, `4b97065` → `2fe0123`)
+
+The owner's chat rework, four small green commits. The floating glass
+drawer (§3.7) is **gone** — the assistant is an app section now.
+
+**1 — the shell (`4b97065`).** `#view-chat` is a two-column layout: a
+sidebar (brand + collapse, Chats/Projects/Logs links, Recents/Projects
+containers, the shop identity with its Settings / Your data / Theme menu)
+and the conversation column (top bar with the status pill, thread, full
+composer). `#agent-shell`, `#agent-scrim` and the journal popup dialog were
+deleted; the change log moved into a **Logs pane of the view** and
+`openJournal()` navigates there. `#agent-fab` stays as a shortcut — it and
+the nav's Assistant pill light up when a card waits. `switchView` gained
+`chat` (in `VIEWS`, `AGENT_VIEWS`, `TITLES`); the engine, ids, voice
+overlay and journal are untouched. The sidebar is a slide-in drawer under
+768px (burger + scrim + Escape) and collapses on desktop. `CACHE v33`.
+
+**2 — sessions (`c4a1fbf`).** Storage became
+`{sessions[], cur, projects[], journal, voice, seq, jseq, ui{collapsed}}`
+under the same key; v1's flat conversation migrates into one session.
+**Every reload archives the open chat** (full history, keyword auto-title
+from the first user message's significant words — renames pinned by
+`renamed: true`) and opens a fresh empty one; an empty active session is
+reused, so no litter. The sidebar gained ＋ New chat, a search box over
+titles **and** message text (with a hit snippet), day buckets (Pinned /
+Today / Yesterday / Previous 7 days / Older), a per-row ⋯ popover (rename /
+move to project / pin / delete behind a confirm), and projects (create,
+click-to-filter, delete without taking chats). `saveAgent()` writes
+`AGENT.messages` back onto its session first (tests poke it directly),
+caps at 20 sessions (oldest unpinned shed), and re-renders the sidebar;
+collapse persists in `ui.collapsed`; `beforeunload` saves. The
+pending-card badge (pill, FAB, nav) counts **across all sessions** and
+lights even with no model attached — approving is a local act. 8 checks.
+`CACHE v34`. One bug the tests caught: the row menu's *Move* both opened
+the project list and executed a move — split into `move` (mode) /
+`setproj` (execute).
+
+**3 — bulk (`2fe0123`).** The same-tool dedupe in `agentLoop` is gone:
+every write action in a reply becomes its own card, extracted as
+`agentPlanCards(actions)` with `AGENT_BULK_MAX = 40` per tool and
+`Record a purchase (3 of 12)` numbering; **Approve all N** (already
+rendered per message) now really does carry a batch. `AI_PROMPT_AGENT`
+gained the matching rule — restock / whole month / sample data → all of
+it in one reply, one action per record, ≤40, items and suppliers from the
+catalogue — written **byte-identically** in `db.js` and `server.py`
+(audit still 174/0, contract 13). `agentParse`'s peel now strips trailing
+digits and separators too (`…}]5}` — the junk that reached the owner as
+raw reply text) before the balance fixer, stopping at a quote so reply
+text is never eaten. 2 checks. `CACHE v35`.
+
+**Tests** — smoke **275 → 301**, audit **174**, `check_static` OK,
+`cleanup_smoke` clean (the owner's 2 real purchases are tolerated by
+design — the boot invariant now fails only on smoke debris).
+
+---
+
 ## 4. What was outstanding — now DONE (2026-10-05)
 
 1. **README Phase 3 edits — done.** Added `income` to the data model, the
@@ -563,8 +625,16 @@ string. Suite **229 / 0**.
   (`pwbudget.voice.mic.v1`); audio is transient — recorded in memory,
   transcribed, dropped (same rule as images). Voice chrome strings ship
   en+fr only; the number lexicons cover en/fr/tw/ga/ee/ha.
+- **The chat is a session list, not one thread.** `pwbudget.agent.v1` holds
+  `{sessions[], cur, projects[], journal, voice, seq, jseq, ui}`; every page
+  load archives the open chat under its keyword title (a rename sticks via
+  `renamed`) and opens an empty one — `AGENT.messages` always points at the
+  active session's array and `saveAgent()` writes it back before persisting.
+  The pending badge counts cards across **all** sessions. `agentPlanCards`
+  may turn a reply into up to `AGENT_BULK_MAX = 40` cards per tool, numbered,
+  and the same-tool dedupe must not come back.
 - Bump `CACHE` in `public/app/sw.js` whenever `app.js`/`db.js`/`styles.css`/
-  `index.html` change (cache-first SW). Current: `pwbudget-v32`.
+  `index.html` change (cache-first SW). Current: `pwbudget-v35`.
 
 ---
 

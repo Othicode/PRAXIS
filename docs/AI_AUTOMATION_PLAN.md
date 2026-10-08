@@ -1,7 +1,8 @@
 # PW Budget — Project Summary & AI / Automation Plan
 
-> Status: **phases 1–3 + Phase 0 + the assistant v2 (agentic) pass
-> implemented, phases 4–5 not yet started.** This
+> Status: **phases 1–3 + Phase 0 + the assistant v2 (agentic) pass +
+> the voice overlay + the chat-view rework (two-column shell, sessions,
+> bulk cards) implemented, phases 4–5 not yet started.** This
 > document records what the project is today, and what we decided the
 > AI/automation layer should be.
 > 2026-10-04 — capture pipeline, statement ingest, knowledge base, income
@@ -58,7 +59,17 @@
 > transcribe) or Web Speech, TTS read-aloud, and tap-to-apply chips with
 > one-step ↩ Undo, destructive confirms and the coverage gate at apply time.
 > `CACHE = "pwbudget-v32"`.
-> Tests now: 174 audit + 275 smoke, 0 failed.
+> Also 2026-10-07 — **chat rework shipped** (4 commits): the floating
+> drawer became a **two-column chat view** with a collapsible sidebar
+> (Chats / Projects / Logs, search, day groups, per-row ⋯ menu, projects,
+> user menu), **sessions** under one key (every reload archives the open
+> chat under a keyword auto-title — v1 migrates in place; pending cards
+> badge across sessions), and the **batch gate lifted**: same-tool dedupe
+> removed, `agentPlanCards()` turns every write action into a numbered card
+> (`3 of 12`) capped at 40 per tool, `AI_PROMPT_AGENT` gained the
+> byte-identical restock/sample-data rule, and `agentParse`'s peel now
+> strips stray digits (`…}]5}`). `CACHE = "pwbudget-v35"`.
+> Tests now: 174 audit + 301 smoke, 0 failed.
 
 ---
 
@@ -97,7 +108,7 @@ build step and no npm dependencies.
 | `public/app/index.html`, `styles.css` | Onyx-&-gold design system, mobile bottom tab bar + "More" sheet |
 | `public/index.html`, `public/pw-budget/` | PRAXIS company site, PW Budget download page |
 | `public/admin/` | Admin dashboard UI |
-| `sw.js` | Cache-first service worker, `CACHE = "pwbudget-v20"` (bump on every update); `/api/*` is network-first |
+| `sw.js` | Cache-first service worker, `CACHE = "pwbudget-v35"` (bump on every update); `/api/*` is network-first |
 | `tools/` | `make_icons.py`, `check_static.py`, `cleanup_smoke.py` |
 | `render.yaml`, `vercel.json`, `netlify.toml` | Deploy targets |
 
@@ -132,7 +143,7 @@ node audit_calculations.js   → 174 passed, 0 failed
                                (calculator, offline↔server parity —
                                including /api/ai/* —, invariants, fixture replay,
                                13 shared model constants incl. AI_PROMPT_VOICE)
-node smoke_test.js           → 275 passed, 0 failed  — needs a server on :8123
+node smoke_test.js           → 301 passed, 0 failed  — needs a server on :8123
                                (run `python server.py 8123` first; it does NOT spawn one)
 python tools/cleanup_smoke.py  → wipes smoke rows from ledger.db afterwards
 ```
@@ -326,6 +337,7 @@ regression suite. Nothing built meanwhile is thrown away.
 | 0 | **Your data**: loud storage failures + backup / restore / CSV export | ✅ **done 2026-10-05** — `db.js`'s `save()` no longer swallows quota errors: `request()` snapshots the store and, if the write did not stick, rolls back and answers **507** with a shared sentence (`server.py` answers 507 too when sqlite reports a full/read-only disk — probed for real with `attrib +R ledger.db`). Persistent red storage banner until a save succeeds. **Your data** dialog: one-file backup in the offline engine's own shape (assembled through the API in server mode), **additive restore** replayed through the ordinary create paths (never deletes, idempotent — no new endpoints to mirror), and purchases/credits/money-in CSV export with BOM. Read fan-out batched to 4: a 72-way parallel burst was enough to get a connection refused and silently downgrade the app to offline for the rest of the session. 165 smoke + 160 audit assertions |
 | A–D | **Assistant v2 (agentic)**: honest capability reporting + retry, richer reads, briefing & follow-ups, approve-gated write powers | ✅ **done 2026-10-07** — 24 tools; coverage-off tools described as `[locked]` (never hidden), `AI_PROMPT_AGENT` says so and became a shared contract string (**12**); `agentTurn` retries once, a dead turn renders *Try again*; keyless **briefing** on open + `agentFollowups` chips; new reads (`get_purchase`, `compare_months`, `get_reminders`, `price_trend`, `top_suppliers`, `navigate`, `search_income`, `budget_health`); write powers still behind Approve: `propose_coverage` (free tool, flips a coverage switch), `import_slip` (one card per line), `backup_books` (file card), **Approve all**; reports take `{month, year, branch_id}`; `CACHE = "pwbudget-v29"`; 229 smoke + 173 audit assertions |
 | V | **Voice overlay**: summon the assistant by voice, multilingual STT, strict-JSON budget actions, tap-to-apply + one-step undo | ✅ **done 2026-10-07** — `POST /api/ai/voice` + `POST /api/ai/transcribe` in both engines, `AI_PROMPT_VOICE` as shared constant **13**; `public/app/voice.js`: draggable panel (fab + Ctrl+Shift+Space, drag-to-move), number engine for en/fr/tw/ga/ee/ha, reply parser + validator (spoken-amounts whitelist, ≤6 flat ops, destructive `confirm`), consent-gated mic → Whisper push-to-talk or Web Speech fallback, TTS read-aloud, en/fr chrome; chips apply to the shown budget month (percent of spendable) with confirm on delete/set-total, **↩ Undo**, change-log rows with a gold rail, coverage gate at apply time; `CACHE = "pwbudget-v32"`; 275 smoke + 174 audit assertions |
+| C | **Chat view**: two-column shell + sessions + bulk cards | ✅ **done 2026-10-07** — the floating drawer is gone: `#view-chat` with a collapsible sidebar (New chat, search over titles + message text, day groups, per-row ⋯ menu, projects, Logs pane, user menu) and the thread + composer on the right; `pwbudget.agent.v1` holds `{sessions, cur, projects, journal, voice, seq, jseq, ui}` (v1 migrates), **every reload archives the open chat under a keyword auto-title**, pending cards badge across all sessions; the same-tool dedupe is lifted — `agentPlanCards()` numbers each card (`3 of 12`) and caps at `AGENT_BULK_MAX = 40`, `AI_PROMPT_AGENT` gained the byte-identical restock/sample-data rule (contract **13** unchanged), `agentParse` peels stray digits (`…}]5}`); `CACHE = "pwbudget-v35"`; 301 smoke + 174 audit assertions |
 | 4 | Knowledge base: `documents`/`references`, `/api/search`, then chat | Worthless until phases 2–3 have produced data |
 | 5 | Builder | Riskiest surface, least valuable for this audience |
 
