@@ -111,6 +111,7 @@ setTimeout(function () {
     <button class="nav-btn" data-view="analytics"><span class="nav-ico">📈</span><span class="nav-txt">Analytics</span></button>
     <button class="nav-btn hide-sm" data-view="budget"><span class="nav-ico">🎯</span><span class="nav-txt">Budget</span></button>
     <button class="nav-btn hide-sm" data-view="branches"><span class="nav-ico">🏬</span><span class="nav-txt">Branches</span></button>
+    <button class="nav-btn hide-sm" data-view="chat"><span class="nav-ico">💬</span><span class="nav-txt">Assistant</span></button>
     <button class="nav-btn hide-sm" id="btn-calc-nav" title="Calculator"><span class="nav-ico">🧮</span><span class="nav-txt">Calculator</span></button>
     <button class="nav-btn only-sm" id="nav-more" aria-expanded="false" aria-controls="more-sheet"><span class="nav-ico">☰</span><span class="nav-txt">More</span></button>
   </nav>
@@ -339,6 +340,85 @@ setTimeout(function () {
         <button class="btn primary" id="btn-add-branch">＋ Add branch</button>
       </div>
       <div id="branch-list"></div>
+    </div>
+  </section>
+
+  <!-- ============ ASSISTANT: two-column chat ============
+       Left: collapsible sidebar of past chats, projects and the change
+       log. Right: the conversation and the composer. The engine (tools,
+       approval cards, coverage switches) is unchanged — only where it
+       lives is new. On phones the sidebar slides in from the burger. -->
+  <section id="view-chat" class="view view-chat hidden">
+    <div class="chat-layout" id="chat-layout">
+      <div class="chat-scrim" id="chat-scrim"></div>
+      <aside class="chat-sidebar" id="chat-sidebar" aria-label="Chats and projects">
+        <div class="chat-side-head">
+          <div class="chat-brand"><span class="agent-av" aria-hidden="true">✦</span><strong>Assistant</strong></div>
+          <button type="button" class="icon-btn" id="chat-collapse" aria-label="Collapse sidebar" title="Collapse sidebar">⟨</button>
+        </div>
+        <nav class="chat-links" id="chat-links" aria-label="Assistant sections">
+          <button type="button" class="chat-link active" data-clink="chats">💬 Chats</button>
+          <button type="button" class="chat-link" data-clink="projects">📁 Projects</button>
+          <button type="button" class="chat-link" data-clink="logs">🕑 Logs</button>
+        </nav>
+        <div class="chat-side-scroll" id="chat-side-scroll">
+          <section class="chat-sec" id="chat-projects-sec">
+            <div class="chat-sec-head"><b>Projects</b></div>
+            <div class="chat-sec-body" id="chat-projects"><p class="chat-sec-empty">No projects yet.</p></div>
+          </section>
+          <section class="chat-sec" id="chat-recents-sec">
+            <div class="chat-sec-head"><b>Recents</b></div>
+            <div class="chat-sec-body" id="chat-recents"><p class="chat-sec-empty">Your conversations appear here.</p></div>
+          </section>
+        </div>
+        <div class="chat-user">
+          <button type="button" class="chat-user-chip" id="chat-user-btn" aria-haspopup="menu" aria-expanded="false">
+            <span class="avatar" id="chat-avatar">•</span>
+            <span class="chat-user-meta"><strong id="chat-user-name">Your shop</strong><small>Owner</small></span>
+            <span class="chat-user-dots" aria-hidden="true">⋯</span>
+          </button>
+          <div class="chat-menu hidden" id="chat-user-menu" role="menu">
+            <button type="button" data-umenu="settings" role="menuitem">⚙ Settings</button>
+            <button type="button" data-umenu="data" role="menuitem">🗂 Your data</button>
+            <button type="button" data-umenu="theme" role="menuitem">🌗 Theme</button>
+          </div>
+        </div>
+      </aside>
+      <div class="chat-main">
+        <header class="chat-topbar">
+          <button type="button" class="icon-btn chat-burger" id="chat-burger" aria-label="Open chats" title="Chats">☰</button>
+          <div class="chat-title" id="chat-title">New chat</div>
+          <span class="agent-pill" id="agent-pill"><i class="agent-dot"></i><span id="agent-status">…</span></span>
+          <span class="chat-head-acts">
+            <button class="icon-btn" id="agent-voice" type="button" aria-label="Read replies aloud" aria-pressed="false" title="Read replies aloud">🔊</button>
+            <button class="icon-btn" id="agent-settings" type="button" aria-label="AI settings" title="AI settings">⚙️</button>
+          </span>
+        </header>
+        <div class="chat-pane">
+          <div class="agent-scroll" id="agent-scroll">
+            <div class="agent-msgs" id="agent-msgs"></div>
+          </div>
+          <div class="chat-logs hidden" id="chat-logs">
+            <div class="chat-logs-head">
+              <b>🕑 Change log</b>
+              <small>Everything the assistant has changed here, with the state it had before. Kept on this device only.</small>
+            </div>
+            <div class="journal-list" id="journal-list"></div>
+          </div>
+        </div>
+        <form class="agent-form" id="agent-form" autocomplete="off">
+          <div class="agent-composer">
+            <button type="button" class="icon-btn agent-cbtn" id="agent-attach-btn" aria-label="Attach a photo or file" title="Attach a photo or file">📎</button>
+            <textarea id="agent-input" rows="1" maxlength="1500"
+              placeholder="Ask anything, or say what to change…"
+              aria-label="Message the assistant"></textarea>
+            <button type="button" class="icon-btn agent-cbtn" id="agent-mic" aria-label="Speak" title="Speak">🎤</button>
+            <button type="submit" class="agent-send" id="agent-send" aria-label="Send">➤</button>
+          </div>
+          <input type="file" id="agent-file" accept="image/*,.csv,.txt,.json,text/*" class="hidden">
+          <p class="agent-note">reads run straight away · anything that changes a record waits for your approval</p>
+        </form>
+      </div>
     </div>
   </section>
 </main>
@@ -599,59 +679,11 @@ setTimeout(function () {
   </div>
 </dialog>
 
-<!-- ============ AI assistant: the control centre ============
-     The app's parts are the model's body; this is the console it drives.
-     Nothing that changes a record happens until a hand presses Approve, and
-     every change is written to an on-device log with the state before it.
-     Presentation: a glass drawer over a dimmed scrim — full sheet on a
-     phone, floating right-hand card on a wide screen. -->
+<!-- ============ AI assistant: opens as its own view ============
+     The two-column chat lives in #view-chat inside <main>. This FAB is
+     the shortcut that jumps there, and it lights up when a card is
+     waiting for the owner's approval. -->
 <button class="agent-fab" id="agent-fab" aria-label="Open the AI assistant" title="AI assistant">✦</button>
-<div class="agent-scrim" id="agent-scrim" aria-hidden="true"></div>
-<div class="agent-shell" id="agent-shell" aria-hidden="true" aria-label="AI assistant">
-  <header class="agent-head">
-    <div class="agent-brand">
-      <span class="agent-av" aria-hidden="true">✦</span>
-      <div class="agent-head-txt">
-        <strong>Assistant</strong>
-        <span class="agent-pill" id="agent-pill"><i class="agent-dot"></i><span id="agent-status">…</span></span>
-      </div>
-    </div>
-    <span class="agent-head-acts">
-      <button class="icon-btn" id="agent-journal" type="button" aria-label="Change log" title="Change log">🕑</button>
-      <button class="icon-btn" id="agent-voice" type="button" aria-label="Read replies aloud" aria-pressed="false" title="Read replies aloud">🔊</button>
-      <button class="icon-btn" id="agent-settings" type="button" aria-label="AI settings" title="AI settings">⚙️</button>
-      <button class="icon-btn" id="agent-close" type="button" aria-label="Close assistant">✕</button>
-    </span>
-  </header>
-  <div class="agent-scroll" id="agent-scroll">
-    <div class="agent-msgs" id="agent-msgs"></div>
-  </div>
-  <form class="agent-form" id="agent-form" autocomplete="off">
-    <div class="agent-composer">
-      <button type="button" class="icon-btn agent-cbtn" id="agent-attach-btn" aria-label="Attach a photo or file" title="Attach a photo or file">📎</button>
-      <textarea id="agent-input" rows="1" maxlength="1500"
-        placeholder="Ask anything, or say what to change…"
-        aria-label="Message the assistant"></textarea>
-      <button type="button" class="icon-btn agent-cbtn" id="agent-mic" aria-label="Speak" title="Speak">🎤</button>
-      <button type="submit" class="agent-send" id="agent-send" aria-label="Send">➤</button>
-    </div>
-    <input type="file" id="agent-file" accept="image/*,.csv,.txt,.json,text/*" class="hidden">
-    <p class="agent-note">reads run straight away · anything that changes a record waits for your approval</p>
-  </form>
-</div>
-
-<!-- ============ Change log (on-device only, never in a backup) ============ -->
-<dialog id="journal-dialog">
-  <div class="dialog-head">
-    <h3>🕑 Change log</h3>
-    <button type="button" class="btn ghost small" data-close>✕</button>
-  </div>
-  <p class="dialog-sub">Everything the assistant has changed here, with the state it had before. Kept on this device only.</p>
-  <div class="journal-list" id="journal-list"></div>
-  <div class="dialog-foot">
-    <button type="button" class="btn primary" data-close>Done</button>
-  </div>
-</dialog>
 
 <!-- ============ Calculator widget (chat-widget style) ============ -->
 <button class="calc-fab" id="calc-fab" aria-label="Open calculator" title="Calculator">🧮</button>

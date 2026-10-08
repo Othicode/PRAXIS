@@ -183,6 +183,7 @@ module.exports = {
   agentTurnFailed, capAgentHistory, agentAlerts, agentDashboardData,
   loadAgent, saveAgent, renderAgent, renderAgentStatus,
   agentOpen, agentClose, agentMic, agentToggleVoice, agentAutogrow,
+  showChatPane, toggleChatSidebar, syncChatUser,
   agentPrepare, agentRunTool, agentExecute, agentDecide, agentUndo,
   agentBuildReport, agentReportModel, pdfFromReport, docxFromReport,
   zipStore, crc32, renderJournal, openJournal,
@@ -232,13 +233,20 @@ async function runMode(mode) {
   const stamp = "smoke-" + mode + "-" + Date.now();
   let creditId = null;
 
-  await check(mode + ": boot & meta (branches present, no purchases)", async () => {
+  await check(mode + ": boot & meta (branches present, no smoke leftovers)", async () => {
     const m = await waitMeta(pw);
     if (!m) return false;
-    const p = await apiGet("/api/purchases");
+    const p = await apiGet("/api/purchases?page_size=100");
     // branches can't be deleted via the API, so they accumulate across runs;
-    // run tools/cleanup_smoke.py to reset to a single branch. Purchases must be clean.
-    return m.branches.length >= 1 && p.rows.length === 0;
+    // run tools/cleanup_smoke.py to reset to a single branch. Real purchases
+    // belong to the owner and are welcome here — what must be clean is the
+    // harness's own debris: a smoke stamp or a smoke fixture's name.
+    const junk = p.rows.filter((r) =>
+      String(r.memo || "").includes("smoke-") ||
+      /^Smoke /.test(r.distributor || "") ||
+      r.distributor === "Alpha Inks" || r.distributor === "Ceda" ||
+      r.distributor === "Ceda Industrial Supplies");
+    return m.branches.length >= 1 && junk.length === 0;
   });
 
   for (const v of ["dashboard", "purchases", "income", "credits", "analytics", "budget", "branches"]) {
@@ -714,19 +722,54 @@ async function runMode(mode) {
     return ds && orv;
   });
 
-  // ---- the assistant: the control centre over the same app ----
-  await check(mode + ": assistant opens over the app and closes again", () => {
+  // ---- the assistant: its own two-column view over the same app ----
+  await check(mode + ": the assistant opens as its own view with a live thread", () => {
     pw.loadAgent();
+    get("view-chat").classList.add("hidden");      // what index.html ships
     pw.agentOpen();
-    const opened = get("agent-shell").classList.contains("open") &&
-      document.body.classList.contains("agent-open") &&
-      get("agent-shell").getAttribute("aria-hidden") === "false";
+    const onChat = pw.state.view === "chat" &&
+      !get("view-chat").classList.contains("hidden");
     pw.renderAgent();
     const empty = get("agent-msgs").innerHTML.includes("What should I do?");
+    const html = fs.readFileSync(path.join(__dirname, "public", "app", "index.html"), "utf8");
+    const drawerGone = html.indexOf('id="agent-shell"') === -1 &&
+      html.indexOf('id="agent-scrim"') === -1 &&
+      html.indexOf('id="journal-dialog"') === -1;
     pw.agentClose();
-    return opened && empty &&
-      !get("agent-shell").classList.contains("open") &&
-      !document.body.classList.contains("agent-open");
+    return onChat && empty && drawerGone;
+  });
+
+  await check(mode + ": the change log lives inside the chat view now", async () => {
+    await pw.switchView("dashboard");
+    pw.renderJournal();
+    pw.openJournal();
+    const logsOn = pw.state.view === "chat" &&
+      !get("chat-logs").classList.contains("hidden") &&
+      get("agent-scroll").classList.contains("hidden");
+    pw.showChatPane("chats");
+    const back = !get("agent-scroll").classList.contains("hidden") &&
+      get("chat-logs").classList.contains("hidden");
+    return logsOn && back;
+  });
+
+  await check(mode + ": the chat view is a nav destination with a collapsible sidebar", async () => {
+    pw.toggleChatSidebar();                        // wide screen: collapse
+    const collapsed = get("chat-layout").classList.contains("collapsed");
+    pw.toggleChatSidebar();                        // and open again
+    const reopened = !get("chat-layout").classList.contains("collapsed");
+    await pw.switchView("chat");
+    const nav = pw.state.view === "chat" && pw.AGENT_VIEWS.indexOf("chat") !== -1 &&
+      pw.agentToolLines().join("\n").indexOf("branches|chat") !== -1;
+    return collapsed && reopened && nav;
+  });
+
+  await check(mode + ": the sidebar's user menu answers", () => {
+    const menu = get("chat-user-menu"), btn = get("chat-user-btn");
+    menu.classList.add("hidden");
+    btn.dispatch("click");
+    const opened = !menu.classList.contains("hidden") && btn.getAttribute("aria-expanded") === "true";
+    menu.dispatch("click", { target: { getAttribute: (k) => (k === "data-umenu" ? "theme" : null) } });
+    return opened && menu.classList.contains("hidden");
   });
 
   await check(mode + ": the agent's hands follow the coverage switch", () => {

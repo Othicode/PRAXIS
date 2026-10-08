@@ -1244,6 +1244,7 @@ const TITLES = {
   analytics: ["Analytics", "Where every cedi goes"],
   budget: ["Budget", "Plan, save, and track"],
   branches: ["Branches", "Your shops and plants"],
+  chat: ["Assistant", "Chat with your books"],
 };
 
 async function switchView(view) {
@@ -1256,7 +1257,7 @@ async function switchView(view) {
      More tab itself has to light up while one of them is on screen. */
   const more = $("#nav-more");
   if (more) more.classList.toggle("active",
-    view === "budget" || view === "branches" || view === "income");
+    view === "budget" || view === "branches" || view === "income" || view === "chat");
   closeMore();
   try {
     if (view === "dashboard") await loadDashboard();
@@ -1265,6 +1266,7 @@ async function switchView(view) {
     else if (view === "credits") await loadCredits();
     else if (view === "analytics") await loadAnalytics();
     else if (view === "budget") await loadBudget();
+    else if (view === "chat") { syncChatUser(); renderAgent(); showChatPane(CHAT_PANE); }
     else await loadBranches();
   } catch (err) { toast(err.message, "err"); }
 }
@@ -1860,7 +1862,7 @@ const AGENT_TOOLS = [
     args: "{n?}", desc: "Who has been paid the most, with share of spend." },
   { id: "navigate", risk: "read", area: "", label: "Open a screen",
     args: "{view}",
-    desc: "view: dashboard|purchases|income|credits|analytics|budget|branches — shows it behind this panel." },
+    desc: "view: dashboard|purchases|income|credits|analytics|budget|branches|chat — opens it in the app." },
   { id: "list_income", risk: "read", area: "money", label: "List money in",
     args: "{month?, limit?}", desc: "List recorded income rows." },
   { id: "search_income", risk: "read", area: "money", label: "Search money in",
@@ -1912,7 +1914,7 @@ const AGENT_TOOLS = [
 const AGENT_TOOL = (id) => AGENT_TOOLS.find((t) => t.id === id) || null;
 /* The screens the assistant may open behind its panel — same list the app's
    own navigation accepts. */
-const AGENT_VIEWS = ["dashboard", "purchases", "income", "credits", "analytics", "budget", "branches"];
+const AGENT_VIEWS = ["dashboard", "purchases", "income", "credits", "analytics", "budget", "branches", "chat"];
 
 /* Which hands are attached right now, by the same coverage switch the rest
    of the app obeys. Reads need no permission beyond the area that owns the
@@ -2169,14 +2171,55 @@ function renderAgentStatus() {
   el.textContent = bits.join(" · ") + (pend ? ` · ${pend} waiting on you` : "");
   const fab = $("#agent-fab");
   if (fab) fab.className = "agent-fab" + (pend ? " pending" : "");
+  const chatNav = document.querySelector('.nav-btn[data-view="chat"]');
+  if (chatNav) chatNav.classList.toggle("pending", !!pend);
+}
+
+/* The assistant is an app section now: opening it is switching to the chat
+   view. The mobile sidebar is a drawer; on a wide screen it collapses to
+   give the thread the full width. */
+let CHAT_PANE = "chats";   // which pane the main area shows: chats | projects | logs
+
+function isMobileChat() {
+  return typeof window.matchMedia === "function" && window.matchMedia("(max-width: 767px)").matches;
+}
+
+function toggleChatSidebar(force) {
+  const side = $("#chat-sidebar"), scrim = $("#chat-scrim"), layout = $("#chat-layout");
+  if (!side || !layout) return;
+  if (isMobileChat()) {
+    const open = force === undefined ? !side.classList.contains("open") : !!force;
+    side.classList.toggle("open", open);
+    if (scrim) scrim.classList.toggle("open", open);
+  } else {
+    const open = force === undefined ? layout.classList.contains("collapsed") : !force;
+    layout.classList.toggle("collapsed", !open);
+  }
+}
+
+/* Chats and Projects share the thread pane; Logs swaps in the change log.
+   The composer stays under both — typing from Logs sends to the chat. */
+function showChatPane(which) {
+  const w = which === "projects" ? "chats" : which;
+  const logs = w === "logs";
+  const thread = $("#agent-scroll"), pane = $("#chat-logs");
+  if (thread) thread.classList.toggle("hidden", logs);
+  if (pane) pane.classList.toggle("hidden", !logs);
+  $$(".chat-link").forEach((b) => b.classList.toggle("active", b.dataset.clink === which));
+  CHAT_PANE = which;
+  if (logs) renderJournal();
+}
+
+/* The sidebar's user row mirrors the top bar's shop identity. */
+function syncChatUser() {
+  const n = $("#chat-user-name"), a = $("#chat-avatar");
+  const pn = $("#profile-name"), pa = $("#profile-avatar");
+  if (n && pn && pn.textContent) n.textContent = pn.textContent;
+  if (a && pa && pa.textContent) a.textContent = pa.textContent;
 }
 
 function agentOpen() {
-  const shell = $("#agent-shell");
-  if (!shell) return;
-  shell.classList.add("open");
-  shell.setAttribute("aria-hidden", "false");
-  document.body.classList.add("agent-open");
+  if (state.view !== "chat") switchView("chat");
   renderAgent();
   /* First opening of an empty conversation gets the briefing; it fetches the
      reminders and re-renders itself, so the panel answers immediately either
@@ -2185,12 +2228,10 @@ function agentOpen() {
   setTimeout(() => { const i = $("#agent-input"); if (i && i.focus) i.focus(); }, 60);
 }
 
+/* Nothing floats over the app to close any more — this only backs out of
+   the mobile drawer (and answers for the harness). */
 function agentClose() {
-  const shell = $("#agent-shell");
-  if (!shell) return;
-  shell.classList.remove("open");
-  shell.setAttribute("aria-hidden", "true");
-  document.body.classList.remove("agent-open");
+  if (isMobileChat()) toggleChatSidebar(false);
 }
 
 /* ---------- what the model is told ---------- */
@@ -3585,9 +3626,8 @@ function renderJournal() {
 }
 
 function openJournal() {
-  renderJournal();
-  const dlg = $("#journal-dialog");
-  if (dlg && dlg.showModal) dlg.showModal();
+  if (state.view !== "chat") switchView("chat");
+  showChatPane("logs");
 }
 
 /* ---------- capture → extract → confirm (AI) ----------
@@ -4367,19 +4407,54 @@ function bindAll() {
   /* --- the assistant: open, speak, send, decide --- */
   const agentFab = $("#agent-fab");
   if (agentFab) agentFab.addEventListener("click", agentOpen);
-  const agentCloseBtn = $("#agent-close");
-  if (agentCloseBtn) agentCloseBtn.addEventListener("click", agentClose);
-  /* the dimmed backdrop behind the drawer is the other way out */
-  const agentScrim = $("#agent-scrim");
-  if (agentScrim) agentScrim.addEventListener("click", agentClose);
   const agentMore = $("#btn-agent-more");
   if (agentMore) agentMore.addEventListener("click", () => { closeMore(); agentOpen(); });
   const agentSettings = $("#agent-settings");
   if (agentSettings) agentSettings.addEventListener("click", openAiDialog);
   const agentVoice = $("#agent-voice");
   if (agentVoice) agentVoice.addEventListener("click", agentToggleVoice);
-  const agentJournal = $("#agent-journal");
-  if (agentJournal) agentJournal.addEventListener("click", openJournal);
+
+  /* --- the chat view: sidebar drawer, section links, user menu --- */
+  const chatBurger = $("#chat-burger");
+  if (chatBurger) chatBurger.addEventListener("click", () => toggleChatSidebar());
+  const chatCollapse = $("#chat-collapse");
+  if (chatCollapse) chatCollapse.addEventListener("click", () => toggleChatSidebar());
+  const chatScrim = $("#chat-scrim");
+  if (chatScrim) chatScrim.addEventListener("click", () => toggleChatSidebar(false));
+  const chatLinks = $("#chat-links");
+  if (chatLinks) chatLinks.addEventListener("click", (e) => {
+    const t = e.target;
+    const which = t && t.getAttribute ? t.getAttribute("data-clink") : null;
+    if (!which) return;
+    showChatPane(which);
+    if (which === "projects") {
+      const sec = $("#chat-projects-sec");
+      if (sec && sec.scrollIntoView) sec.scrollIntoView({ block: "nearest" });
+    }
+    if (isMobileChat()) toggleChatSidebar(false);
+  });
+  const chatUserBtn = $("#chat-user-btn");
+  if (chatUserBtn) chatUserBtn.addEventListener("click", (e) => {
+    if (e.stopPropagation) e.stopPropagation();
+    const m = $("#chat-user-menu");
+    if (m) m.classList.toggle("hidden");
+    chatUserBtn.setAttribute("aria-expanded",
+      m && !m.classList.contains("hidden") ? "true" : "false");
+  });
+  const chatUserMenu = $("#chat-user-menu");
+  if (chatUserMenu) chatUserMenu.addEventListener("click", (e) => {
+    const t = e.target;
+    const act = t && t.getAttribute ? t.getAttribute("data-umenu") : null;
+    if (!act) return;
+    chatUserMenu.classList.add("hidden");
+    if (act === "settings") openAiDialog();
+    else if (act === "data") openDataDialog();
+    else if (act === "theme") toggleTheme();
+  });
+  document.addEventListener("click", () => {
+    const m = $("#chat-user-menu");
+    if (m && !m.classList.contains("hidden")) m.classList.add("hidden");
+  });
   const agentMicBtn = $("#agent-mic");
   if (agentMicBtn) agentMicBtn.addEventListener("click", agentMic);
   const agentAttach = $("#agent-attach-btn");
@@ -4445,15 +4520,12 @@ function bindAll() {
     if (!t || !t.closest) return;
     const u = t.closest("[data-journal-undo]");
     if (!u) return;
-    const dlg = $("#journal-dialog");
-    if (dlg && dlg.close) dlg.close();
     agentUndo(Number(u.getAttribute("data-journal-undo")));
   });
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    const shell = $("#agent-shell");
-    if (shell && shell.classList.contains("open")) agentClose();
+    if (isMobileChat()) toggleChatSidebar(false);
   });
 
   // purchases filters
@@ -4654,7 +4726,7 @@ async function init() {
     const act = new URLSearchParams(location.search).get("action");
     if (act === "new") setTimeout(() => openEntryDialog(), 600);
     // deep link: /app/#purchases, /app/#credits, ... (also handy for previews)
-    const VIEWS = ["dashboard", "purchases", "income", "credits", "analytics", "budget", "branches"];
+    const VIEWS = ["dashboard", "purchases", "income", "credits", "analytics", "budget", "branches", "chat"];
     const h = (location.hash || "").replace("#", "");
     if (VIEWS.includes(h)) switchView(h);
   } catch (e) { /* ignore */ }
