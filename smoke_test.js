@@ -189,7 +189,7 @@ module.exports = {
   agentSession, activeSession, agentSessionTitle, agentAutoTitle,
   renderSidebar, openRowMenu, closeRowMenu, renderRowMenu, runRowMenuAction,
   closestAttr, capSessions,
-  agentPrepare, agentRunTool, agentExecute, agentDecide, agentUndo,
+  agentPrepare, agentPlanCards, agentRunTool, agentExecute, agentDecide, agentUndo,
   agentBuildReport, agentReportModel, pdfFromReport, docxFromReport,
   zipStore, crc32, renderJournal, openJournal,
 };
@@ -1033,6 +1033,38 @@ async function runMode(mode) {
     const r = pw.agentParse('{"reply":"Recording now","actions":[{"tool":"create_purchase","args":{"product":"Ban');
     return r.reply === "Recording now" && r.actions.length === 1 &&
       r.actions[0].tool === "create_purchase" && r.actions[0].args.product === "Ban";
+  });
+
+  await check(mode + ": a reply ending in stray digits still parses the batch", () => {
+    const r = pw.agentParse('{"reply":"Records 12 purchases.","actions":[{"tool":"create_purchase","args":{"date":"2026-10-07","distributor":"General","product":"Banners","unit":"pcs","quantity":1,"total_amount":40,"payment_method":"cash"}}]}}]5}');
+    return r.reply === "Records 12 purchases." && r.actions.length === 1 &&
+      r.actions[0].tool === "create_purchase" &&
+      r.actions[0].args.product === "Banners" && r.actions[0].args.total_amount === 40;
+  });
+
+  await check(mode + ": one reply becomes one numbered card per row, capped at 40", async () => {
+    const buy = (n) => ({
+      tool: "create_purchase",
+      args: { date: "2026-10-07", distributor: "Sample Distributor", product: "Item " + n,
+              unit: "pcs", quantity: n, total_amount: n * 10, payment_method: "cash" },
+    });
+    const twelve = await pw.agentPlanCards(Array.from({ length: 12 }, (_, i) => buy(i + 1)));
+    const labels = twelve.map((c) => c.label);
+    const numbered = twelve.length === 12 &&
+      labels[0].indexOf("(1 of 12)") !== -1 && labels[11].indexOf("(12 of 12)") !== -1 &&
+      twelve.every((c) => c.type === "ask" && c.status === "pending");
+    const distinct = twelve.every((c, i) => c.args.product === "Item " + (i + 1));
+    const flood = await pw.agentPlanCards(Array.from({ length: 45 }, (_, i) => buy(i + 1)));
+    const capped = flood.length === 40 &&
+      flood[39].label.indexOf("(40 of 40)") !== -1;
+    // the panel then offers one tap over the whole batch
+    const msg = { role: "assistant", text: "Twelve rows ready.", mid: pw.AGENT.seq++, cards: twelve };
+    pw.AGENT.messages.push(msg);
+    pw.renderAgent();
+    const oneTap = get("agent-msgs").innerHTML.indexOf("Approve all 12") !== -1;
+    pw.AGENT.messages.pop();
+    pw.renderAgent();
+    return numbered && distinct && capped && oneTap;
   });
 
   // ---- voice overlay ----

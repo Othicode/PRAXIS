@@ -1836,6 +1836,7 @@ const AGENT_TURNS = 3;      // model turns allowed per user message
 const AGENT_GAP = 1200;     // ms between model calls — free tiers are metered
 const AGENT_JOURNAL_MAX = 120;
 const AGENT_SESSION_MAX = 20;
+const AGENT_BULK_MAX = 40;   // actions per tool one reply may turn into cards
 
 /* A flat conversation became a list of them: every reload archives the chat
    that was open and starts an empty one, the sidebar holds the rest. */
@@ -2735,10 +2736,13 @@ function agentParse(raw) {
   let obj = null;
   for (const base of bases) {
     let t = base;
-    for (let i = 0; i <= 8 && t && !obj; i++) {
+    /* Peel the tail a model adds after its object: stray closers, a count
+       pasted on the end ("...}]5}"), quotes, whitespace. A quote stops the
+       peel, so text inside the JSON can never be eaten. */
+    for (let i = 0; i <= 16 && t && !obj; i++) {
       obj = parse(t);
       if (obj) break;
-      const n = t.replace(/[}\]\s`]$/, "");
+      const n = t.replace(/[}\]\s\d,;`]$/, "");
       if (n === t) {
         const fixed = balance(t);
         if (fixed) obj = parse(fixed);
@@ -2782,6 +2786,7 @@ async function agentLoop(maxTurns) {
          and stop — running the loop again would just repeat the failure. */
       if (turn.failed) { msg.retry = true; renderAgent(); break; }
       const reads = [];
+      const asks = [];
       const allowed = agentTools().map((t) => t.id);
       for (const a of turn.actions) {
         if (allowed.indexOf(a.tool) === -1) continue;
@@ -2794,9 +2799,9 @@ async function agentLoop(maxTurns) {
           continue;
         }
         if (tool.risk === "read") reads.push(a);
-        else if (!msg.cards.some((c) => c.type === "ask" && c.tool === a.tool))
-          msg.cards.push(await agentPrepare(tool, a.args));
+        else asks.push(a);
       }
+      for (const c of await agentPlanCards(asks)) msg.cards.push(c);
       renderAgent();
       if (!reads.length) { msg.follow = agentFollowups(msg); renderAgent(); break; }
       const seen = [];
@@ -2979,6 +2984,28 @@ async function agentRetry(mid) {
 }
 
 /* ---------- building an approval card ---------- */
+/* The whole batch becomes cards — a restock is twelve purchases, not one
+   with eleven left on the floor. Same-tool actions are no longer deduped;
+   the flood stops at AGENT_BULK_MAX per tool, and a batch of more than one
+   numbers itself ("2 of 12") so the owner can tell the rows apart. Reads
+   and import_slip are handled by the loop before this is called. */
+async function agentPlanCards(actions) {
+  const total = {}, seen = {};
+  for (const a of actions) total[a.tool] = (total[a.tool] || 0) + 1;
+  const cards = [];
+  for (const a of actions) {
+    const tool = AGENT_TOOL(a.tool);
+    if (!tool) continue;
+    seen[a.tool] = (seen[a.tool] || 0) + 1;
+    if (seen[a.tool] > AGENT_BULK_MAX) continue;
+    const card = await agentPrepare(tool, a.args);
+    const shown = Math.min(total[a.tool], AGENT_BULK_MAX);
+    if (shown > 1) card.label = `${card.label} (${seen[a.tool]} of ${shown})`;
+    cards.push(card);
+  }
+  return cards;
+}
+
 async function agentPrepare(tool, args) {
   const a = args || {};
   const card = { type: "ask", tool: tool.id, label: tool.label, risk: tool.risk,
