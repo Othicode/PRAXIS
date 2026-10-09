@@ -29,25 +29,8 @@ try {
 </head>
 <body>
 
-<!-- ============ Intro logo reveal (~5s) ============ -->
+<!-- ============ Intro logo reveal (~2.5s, PW Budget only) ============ -->
 <div id="intro" class="intro" aria-hidden="true">
-  <div class="intro-stage intro-praxis">
-    <svg class="intro-mark" viewBox="0 0 52 52" aria-hidden="true">
-      <defs>
-        <linearGradient id="ig1" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stop-color="#f7e7a8"/><stop offset=".5" stop-color="#d4af37"/><stop offset="1" stop-color="#a8842a"/>
-        </linearGradient>
-        <linearGradient id="ig2" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stop-color="#2a2210"/><stop offset="1" stop-color="#12100a"/>
-        </linearGradient>
-      </defs>
-      <polygon points="26,0 50,44 2,44" fill="url(#ig1)"/>
-      <polygon points="26,0 50,44 26,44" fill="url(#ig2)" opacity=".55"/>
-      <rect x="0" y="47" width="52" height="5" rx="2" fill="url(#ig1)"/>
-    </svg>
-    <div class="intro-word">PRAXIS</div>
-    <div class="intro-tag">we think · we create · we do</div>
-  </div>
   <div class="intro-stage intro-pw">
     <svg class="intro-mark" viewBox="0 0 512 512" aria-hidden="true">
       <defs>
@@ -68,12 +51,12 @@ try {
   </div>
 </div>
 <script>
-/* remove the splash once its ~5s run is done (and never let it trap the UI) */
+/* remove the splash once its ~2.5s run is done (and never let it trap the UI) */
 setTimeout(function () {
   var i = document.getElementById("intro");
   if (i) i.classList.add("gone");
   setTimeout(function () { if (i && i.parentNode) i.parentNode.removeChild(i); }, 700);
-}, 5000);
+}, 2500);
 </script>
 
 <!-- ============ Top bar ============ -->
