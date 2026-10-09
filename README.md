@@ -184,6 +184,48 @@ No backend needed? Create a **Static Site** with publish directory `public`
 instead — the PWA detects the missing `/api` and switches to its offline
 storage engine. Same for `vercel.json` and `netlify.toml`.
 
+## Going live on Railway
+
+`railway.json` ships with the repo (Nixpacks builds the dependency-free
+Python server; no build step to configure):
+
+1. Push to GitHub → Railway → **New Project → Deploy from GitHub repo**
+   (picks up `railway.json` automatically).
+2. **Settings → Variables** — set the two the app needs:
+   - `HOST=0.0.0.0`  (required — without it the server binds 127.0.0.1
+     and Railway's router can never reach it)
+   - `PWBUDGET_DATA_DIR=/data`  (set this together with step 3)
+3. **Settings → Volume** — add a volume mounted at `/data` (up to 5 GB on
+   the Hobby plan; `ledger.db` is a few MB). Without it the database lives
+   on the ephemeral container disk and is wiped on every redeploy.
+4. **Settings → Networking** — generate a `*.railway.app` domain, or attach
+   your own domain. HTTPS is automatic.
+5. **AI for every tester, zero setup** — same Variables page:
+   - `AI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai`
+     (Gemini's OpenAI-compatible endpoint — the app's built-in "Google
+     Gemini" preset points here too)
+   - `AI_MODEL=gemini-3.5-flash`
+   - `AI_API_KEY=<a Google AI Studio key>`
+   With `AI_API_KEY` set on the server, every model call the app makes —
+   assistant chat, receipt scan, voice — is signed by the server itself;
+   testers never paste a key of their own. Rotating the key later is a
+   one-field dashboard edit. (Devices can still paste their own key in the
+   app's AI Settings — that path stays device-local.)
+
+Cost reality: the Hobby plan is $5/mo **including $5 of usage** — a light
+instance of this server (≈0.5 GB RAM + a tiny volume) lands at **$5–8/mo
+all-in**, billed per second (stop the service, stop paying for compute).
+
+Migrating from Render (or any other host): use **Your data → backup** in
+the app on the old origin, then import that file on the new one, per
+device. Phone PWAs keep their ledger in device storage per origin, so a
+new domain means each phone imports once — point a **custom domain** at
+Railway from the start and any future host change is a DNS flip, not a
+migration.
+
+No backend wanted? Same as Render: delete the service and serve `public/`
+statically — the PWA falls back to its offline engine on its own.
+
 ## Going live with a stable link
 
 The dev tunnel uses Cloudflare *quick tunnels* — the URL is temporary and
