@@ -86,6 +86,26 @@ body {
 }
 /* 16px on phones so iOS Safari doesn't zoom the viewport on focus */
 input, select, textarea { font-family: var(--font); font-size: 16px; }
+
+/* ---- text fields: Notion-style polish, onyx-gold kept ----
+   Same theme, more shine: brighter typed text, readable
+   placeholders (was --muted on --field, too dim), gold caret,
+   soft focus glow. Sizes untouched — 16px phone rule stays. */
+input, select, textarea { color: var(--ink); caret-color: var(--gold); }
+input::placeholder, textarea::placeholder { color: #cfc4a8; opacity: 1; }
+input::-webkit-input-placeholder, textarea::-webkit-input-placeholder { color: #cfc4a8; opacity: 1; }
+.filters input, .filters select, .form-grid input, .form-grid select,
+.paste-box textarea, .stmt-text, .branch-pick select,
+.budget-form input, .budget-form select, .branch-add input,
+.alloc-row input, .agent-composer textarea, .chat-search input,
+.voice-form input {
+  line-height: 1.5;
+  transition: border-color .15s, box-shadow .15s, background .15s;
+}
+.filters input:hover, .form-grid input:hover, .form-grid select:hover,
+.paste-box textarea:hover, .stmt-text:hover {
+  border-color: var(--line2);
+}
 [hidden] { display: none !important; }
 
 /* ============ Top bar ============ */
@@ -1036,10 +1056,12 @@ body.calc-open .agent-fab { opacity: 0; pointer-events: none; }
 }
 .chat-head-acts .icon-btn.on { background: var(--gold); color: #191301; border-color: var(--gold); }
 
-/* --- the thread --- */
+/* --- the thread: one calm reading column ---
+   The assistant speaks on the page itself (like ChatGPT/Claude) and only the
+   owner's question gets a box. Fewer boxes, more reading. */
 .agent-scroll {
   flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
-  padding: 16px 12px 8px;
+  padding: 22px 16px 10px;
   scrollbar-width: thin; scrollbar-color: var(--line2) transparent;
 }
 .agent-scroll::-webkit-scrollbar { width: 8px; }
@@ -1047,55 +1069,101 @@ body.calc-open .agent-fab { opacity: 0; pointer-events: none; }
   background: var(--line2); border-radius: 99px;
   border: 2px solid transparent; background-clip: content-box;
 }
-.agent-msgs { display: flex; flex-direction: column; gap: 14px; max-width: 680px; margin: 0 auto; }
-.agent-row { display: flex; gap: 9px; width: 100%; }
+.agent-msgs { display: flex; flex-direction: column; gap: 22px; max-width: 760px; margin: 0 auto; }
+.agent-row { display: flex; gap: 11px; width: 100%; }
 .agent-row.me { justify-content: flex-end; }
 .agent-row .agent-av {
-  align-self: flex-start; margin-top: 2px;
-  width: 28px; height: 28px; font-size: 13px;
+  align-self: flex-start; margin-top: 1px;
+  width: 30px; height: 30px; font-size: 13px;
   box-shadow: 0 6px 14px -8px rgba(212,175,55,.85);
 }
 .agent-col {
-  display: flex; flex-direction: column; gap: 8px;
-  min-width: 0; max-width: 86%;
+  display: flex; flex-direction: column; gap: 7px;
+  min-width: 0; max-width: 88%;
 }
+.agent-row.me .agent-col { align-items: flex-end; }
 /* only what appeared since the last paint moves — the list is rebuilt whole */
 .agent-row.fresh { animation: agentIn .3s cubic-bezier(.2,.8,.25,1) both; }
 @keyframes agentIn {
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: none; }
 }
+.agent-who {
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: 12.5px; line-height: 1;
+}
+.agent-who b { font-weight: 800; letter-spacing: -.1px; }
+.agent-who time { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .agent-bubble {
-  max-width: 100%; padding: 10px 14px; border-radius: 18px;
-  white-space: pre-wrap; word-break: break-word;
-  font-size: 14.5px; line-height: 1.5; min-width: 44px;
+  max-width: 100%; font-size: 15px; line-height: 1.62; min-width: 44px;
+  word-break: break-word;
 }
-.agent-row.bot .agent-bubble { align-self: flex-start; }
+/* the owner's question: still gold, but a soft tint instead of a slab */
 .agent-row.me .agent-bubble {
-  align-self: flex-end;
-  background: var(--gold-grad); color: #191301;
-  border-bottom-right-radius: 6px; font-weight: 600;
-  box-shadow: 0 10px 22px -14px rgba(212,175,55,.95);
+  padding: 11px 15px; border-radius: 16px 16px 4px 16px;
+  white-space: pre-wrap;
+  background: linear-gradient(140deg, rgba(212,175,55,.22), rgba(212,175,55,.09));
+  border: 1px solid rgba(212,175,55,.34);
+  box-shadow: 0 10px 22px -16px rgba(212,175,55,.9);
 }
-.agent-row.bot .agent-bubble {
-  background: var(--panel);
-  background: color-mix(in srgb, var(--panel) 92%, transparent);
-  border: 1px solid var(--line);
-  border-bottom-left-radius: 6px;
-  box-shadow: 0 8px 20px -16px rgba(0,0,0,.75);
+.agent-row.me .agent-bubble time {
+  display: block; margin-top: 6px; font-size: 10.5px; color: var(--muted);
+  text-align: right; font-variant-numeric: tabular-nums;
 }
-.agent-say {
-  display: block; margin: 4px 0 0 auto; padding: 2px 8px; min-height: 44px; min-width: 44px;
-  background: none; border: none; border-radius: 10px; cursor: pointer;
-  color: inherit; opacity: .45; font-size: 13px;
-  transition: opacity .14s, background .14s;
+/* the assistant's answer: no box at all */
+.agent-row.bot .agent-bubble { padding: 0; }
+.agent-bubble.md { white-space: normal; }
+.agent-bubble.md :where(p, ul, ol, pre, blockquote, h3, h4, h5, h6) { margin: 0 0 .72em; }
+.agent-bubble.md :where(p, ul, ol, pre, blockquote, h3, h4, h5, h6):last-child { margin-bottom: 0; }
+.agent-bubble.md ul, .agent-bubble.md ol {
+  padding-left: 1.3em; display: flex; flex-direction: column; gap: .28em;
 }
-.agent-say:hover { opacity: 1; background: rgba(212,175,55,.2); }
+.agent-bubble.md li::marker { color: var(--gold); }
+.agent-bubble.md :is(h3, h4, h5, h6) { line-height: 1.3; letter-spacing: -.2px; }
+.agent-bubble.md :is(h3, h4) { font-size: 16px; }
+.agent-bubble.md :is(h5, h6) { font-size: 14.5px; }
+.agent-bubble.md strong { color: var(--ink); font-weight: 800; }
+.agent-bubble.md code {
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .87em;
+  background: rgba(212,175,55,.13); border: 1px solid var(--line2);
+  border-radius: 6px; padding: 1px 5px;
+}
+.agent-bubble.md pre {
+  background: var(--panel2); border: 1px solid var(--line2);
+  border-radius: 12px; padding: 11px 13px; overflow-x: auto;
+}
+.agent-bubble.md pre code {
+  background: none; border: 0; padding: 0; font-size: 12.5px; line-height: 1.55;
+}
+.agent-bubble.md blockquote {
+  border-left: 3px solid var(--gold); padding: 1px 0 1px 11px; color: var(--muted);
+}
+
+/* --- per-message controls: copy, read aloud, regenerate, edit --- */
+.agent-acts { display: flex; gap: 2px; margin-top: -3px; }
+.agent-act {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 34px; min-width: 34px; padding: 0 8px;
+  background: none; border: 1px solid transparent; border-radius: 9px;
+  color: var(--muted); cursor: pointer; font-size: 13px;
+  opacity: 0; transition: opacity .14s, background .14s, color .14s, border-color .14s;
+}
+.agent-row:hover .agent-act, .agent-act:focus-visible { opacity: .85; }
+.agent-act:hover {
+  opacity: 1; background: rgba(212,175,55,.14);
+  color: var(--gold-hi); border-color: var(--line2);
+}
+@media (pointer: coarse) {
+  .agent-act { opacity: .7; min-height: 44px; min-width: 44px; }
+}
 .agent-sys {
   align-self: center; text-align: center; max-width: 92%;
   font-size: 11.5px; color: var(--muted); line-height: 1.5;
 }
-.agent-bubble.typing { display: inline-flex; gap: 5px; align-items: center; padding: 13px 16px; }
+.agent-bubble.typing {
+  display: inline-flex; gap: 7px; align-items: center; padding: 2px 0;
+  color: var(--muted); font-size: 12.5px; font-weight: 600;
+}
 .agent-bubble.typing i {
   width: 7px; height: 7px; border-radius: 50%; background: var(--gold);
   animation: agentDot 1s infinite ease-in-out;
@@ -1107,7 +1175,7 @@ body.calc-open .agent-fab { opacity: 0; pointer-events: none; }
   50% { opacity: 1; transform: translateY(-3px); }
 }
 
-/* --- opening state: orb, greeting, starter chips --- */
+/* --- opening state: orb, greeting, then the starters as tappable cards --- */
 .agent-empty { text-align: center; padding: 24px 6px 12px; color: var(--muted); }
 .agent-empty-ico {
   width: 62px; height: 62px; border-radius: 50%;
@@ -1120,8 +1188,31 @@ body.calc-open .agent-fab { opacity: 0; pointer-events: none; }
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-6px); }
 }
-.agent-empty b { display: block; color: var(--ink); font-size: 18px; margin-bottom: 6px; letter-spacing: -.2px; }
-.agent-empty p { font-size: 13.5px; line-height: 1.6; max-width: 40ch; margin: 0 auto 16px; }
+.agent-empty b { display: block; color: var(--ink); font-size: 19px; margin-bottom: 6px; letter-spacing: -.3px; }
+.agent-empty p { font-size: 13.5px; line-height: 1.6; max-width: 44ch; margin: 0 auto 16px; }
+.agent-sugs {
+  display: grid; grid-template-columns: 1fr; gap: 8px;
+  max-width: 560px; margin: 14px auto 0; text-align: left;
+}
+@media (min-width: 560px) { .agent-sugs { grid-template-columns: 1fr 1fr; } }
+.agent-sug {
+  display: flex; align-items: center; gap: 11px; text-align: left;
+  padding: 11px 13px; min-height: 60px; cursor: pointer;
+  background: var(--panel); border: 1px solid var(--line2); border-radius: 14px;
+  color: var(--ink); transition: border-color .14s, transform .14s, box-shadow .14s;
+}
+.agent-sug:hover {
+  border-color: var(--gold); transform: translateY(-1px);
+  box-shadow: 0 10px 20px -14px rgba(212,175,55,.9);
+}
+.agent-sug i {
+  flex: none; width: 34px; height: 34px; border-radius: 10px; font-style: normal;
+  display: grid; place-items: center; font-size: 16px;
+  background: rgba(212,175,55,.13);
+}
+.agent-sug span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.agent-sug b { font-size: 13.5px; font-weight: 700; line-height: 1.3; }
+.agent-sug small { font-size: 11.5px; color: var(--muted); }
 .agent-chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .agent-chip {
   border: 1px solid rgba(212,175,55,.28); color: var(--ink);
@@ -1212,7 +1303,7 @@ body.calc-open .agent-fab { opacity: 0; pointer-events: none; }
 }
 .agent-composer {
   display: flex; align-items: flex-end; gap: 4px;
-  max-width: 680px; margin: 0 auto;
+  max-width: 760px; margin: 0 auto;
   background: var(--panel);
   background: color-mix(in srgb, var(--panel) 96%, transparent);
   border: 1px solid var(--line2); border-radius: 24px;
@@ -1249,10 +1340,39 @@ body.calc-open .agent-fab { opacity: 0; pointer-events: none; }
 .agent-send:hover:not(:disabled) { transform: scale(1.07); filter: brightness(1.06); }
 .agent-send:active:not(:disabled) { transform: scale(.95); }
 .agent-send:disabled { opacity: .45; cursor: default; }
-.agent-note {
-  text-align: center; font-size: 10.5px; color: var(--muted);
-  margin: 7px auto 0; max-width: 680px;
+.agent-form.busy .agent-send { display: none; }
+/* ■ stop takes the send button's own slot, so the thumb never hunts for it */
+.agent-stop {
+  flex: none; width: 42px; height: 42px; border-radius: 50%;
+  border: 1px solid var(--line2);
+  background: var(--panel2); color: var(--ink); cursor: pointer;
+  font-size: 12px; display: grid; place-items: center;
+  transition: background .14s, color .14s, border-color .14s, transform .14s;
 }
+.agent-stop:hover {
+  background: rgba(248,113,113,.18); color: var(--red); border-color: var(--red);
+}
+.agent-stop:active { transform: scale(.94); }
+.agent-under {
+  display: flex; align-items: center; gap: 10px;
+  max-width: 760px; margin: 7px auto 0;
+}
+.agent-note { flex: 1 1 auto; font-size: 10.5px; color: var(--muted); margin: 0; text-align: center; }
+.agent-count {
+  flex: 0 0 auto; font-size: 10.5px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.agent-count.near { color: var(--amber); }
+/* ↓ back to the newest answer, only once the owner has scrolled away */
+.agent-jump {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 12px; z-index: 6;
+  width: 38px; height: 38px; border-radius: 50%;
+  border: 1px solid var(--line2); background: var(--panel);
+  color: var(--ink); cursor: pointer; font-size: 15px;
+  display: grid; place-items: center;
+  box-shadow: 0 12px 26px -14px rgba(0,0,0,.85);
+}
+.agent-jump:hover { border-color: var(--gold); color: var(--gold-hi); }
 
 /* the assistant stays quiet when the owner asked for stillness */
 @media (prefers-reduced-motion: reduce) {
@@ -1438,15 +1558,32 @@ body.calc-open .agent-fab { opacity: 0; pointer-events: none; }
   flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
   padding: 9px 12px; border-bottom: 1px solid var(--line2);
 }
+.chat-headline {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: center; gap: 10px;
+}
 .chat-title {
-  flex: 1 1 auto; min-width: 0; font-size: 14.5px; font-weight: 800;
+  flex: 0 1 auto; min-width: 0; font-size: 14.5px; font-weight: 800;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.chat-topbar .agent-pill { flex: 0 1 auto; max-width: 42%; }
-.chat-head-acts { display: flex; gap: 3px; flex: 0 0 auto; }
+.chat-headline .agent-pill { flex: 0 1 auto; max-width: 46%; }
+.chat-head-acts { display: flex; gap: 3px; flex: 0 0 auto; align-items: center; }
+/* the model in use, spelled out — one tap opens the AI settings */
+.chat-model {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 190px;
+  min-height: 32px; padding: 0 11px; margin-right: 3px; cursor: pointer;
+  background: var(--panel); border: 1px solid var(--line2); border-radius: 999px;
+  color: var(--ink); font-size: 12px; font-weight: 700; font-family: inherit;
+  transition: border-color .14s, background .14s;
+}
+.chat-model span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-model:hover { border-color: var(--gold); }
+.chat-model .agent-dot { background: var(--green); box-shadow: 0 0 0 3px rgba(16,185,129,.18); }
+.chat-model.off .agent-dot { background: var(--muted); box-shadow: none; }
+.chat-model.off { color: var(--muted); }
 .chat-burger { display: none; }
 .chat-scrim { display: none; }
-.chat-pane { flex: 1 1 auto; min-height: 0; display: flex; }
+.chat-pane { flex: 1 1 auto; min-height: 0; display: flex; position: relative; }
 .chat-logs {
   flex: 1 1 auto; min-width: 0; overflow-y: auto;
   overscroll-behavior: contain; padding: 14px 14px 8px;
@@ -1474,6 +1611,7 @@ body.calc-open .agent-fab { opacity: 0; pointer-events: none; }
     border-left: 0; border-right: 0; border-bottom: 0; border-radius: 0;
   }
   .chat-burger { display: grid; }
+  .chat-model { display: none; }   /* the status pill already says it on a phone */
   .chat-sidebar {
     position: absolute; top: 0; bottom: 0; left: 0; z-index: 30;
     width: min(300px, 86%);

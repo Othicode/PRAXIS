@@ -60,7 +60,12 @@ class El {
   addEventListener(t, fn) { (this._listeners[t] = this._listeners[t] || []).push(fn); }
   dispatch(t, ev) {
     const e = Object.assign({ target: this, currentTarget: this, preventDefault() {} }, ev || {});
-    (this._listeners[t] || []).forEach((fn) => fn(e));
+    let out;
+    (this._listeners[t] || []).forEach((fn) => {
+      const r = fn(e);
+      if (r && typeof r.then === "function") out = r;   // an async handler's work
+    });
+    return out;                                          // so a test can await it
   }
   click() { this.dispatch("click"); }   // HTMLElement.click(), for download links
   querySelector() { return new El("div", null); }
@@ -1312,38 +1317,31 @@ async function runMode(mode) {
     pw.setAiArea("app", true);
     try {
       V.renderChips([{ op: "set_total", amount: 1000, save: 0, confirm: false }], [1000]);
-      click("0");
-      await sleep(80);
+      await click("0");
       const step1 = pw.state.budget.baseTotal === 1000 && chips().includes("disabled");
 
       V.renderChips([{ op: "add_item", name: nm, amount: 500 }], [500]);
-      click("0");
-      await sleep(80);
+      await click("0");
       const step2 = !!row() && Math.abs(Number(row().percent) - 50) < 0.01;
 
       V.renderChips([{ op: "update_item", name: nm, amount: 250 }], [250]);
-      click("0");
-      await sleep(80);
+      await click("0");
       const step3 = !!row() && Math.abs(Number(row().percent) - 25) < 0.01;
 
       V.renderChips([{ op: "delete_item", name: nm, confirm: false }], []);
-      click("0");
-      await sleep(80);
+      await click("0");
       const step4 = !row();
 
-      click("undo");
-      await sleep(80);
+      await click("undo");
       const step5 = !!row() && Math.abs(Number(row().percent) - 25) < 0.01 &&
         !chips().includes('data-vi="undo"');
 
       V.renderChips([{ op: "delete_item", name: nm, confirm: false }], []);
-      click("0");
-      await sleep(80);
+      await click("0");
       const step6 = !row();
 
       V.renderChips([{ op: "set_total", amount: orig.t, save: orig.s, confirm: false }], [orig.t]);
-      click("0");
-      await sleep(80);
+      await click("0");
       const back = pw.state.budget.baseTotal === orig.t &&
         pw.state.budget.baseSave === orig.s &&
         JSON.stringify(pw.state.budget.rows || []) === orig.rows;
@@ -1362,18 +1360,15 @@ async function runMode(mode) {
     const chips = () => byId("voice-chips").innerHTML;
     const click = (vi) => byId("voice-chips").dispatch("click", { target: { dataset: { vi } } });
     V.renderChips([{ op: "set_total", amount: 1200, save: 0, confirm: false }], [1200]);
-    click("0");
-    await sleep(60);
+    await click("0");
     const blocked = pw.state.budget.baseTotal === t0 &&
       /coverage/i.test(byId("voice-note").textContent) &&
       !chips().includes("disabled");
     pw.setAiArea("app", true);
-    click("0");
-    await sleep(80);
+    await click("0");
     const opened = pw.state.budget.baseTotal === 1200 && chips().includes("disabled");
     V.renderChips([{ op: "set_total", amount: t0, save: s0, confirm: false }], [t0]);
-    click("0");
-    await sleep(80);
+    await click("0");
     const back = pw.state.budget.baseTotal === t0 && pw.state.budget.baseSave === s0;
     pw.setAiArea("app", false);
     return blocked && opened && back;
@@ -1388,8 +1383,7 @@ async function runMode(mode) {
     pw.setAiArea("app", true);
     try {
       V.renderChips([{ op: "set_total", amount: 777, save: 1, confirm: false }], [777]);
-      byId("voice-chips").dispatch("click", { target: { dataset: { vi: "0" } } });
-      await sleep(60);
+      await byId("voice-chips").dispatch("click", { target: { dataset: { vi: "0" } } });
       return pw.state.budget.baseTotal === t0 &&
         JSON.stringify(pw.state.budget.rows || []) === before &&
         /declined/i.test(byId("voice-note").textContent) &&
@@ -1404,15 +1398,13 @@ async function runMode(mode) {
     const V = pw.VoiceOverlay;
     pw.setAiArea("app", true);
     V.renderChips([{ op: "add_item", name: "ghost", amount: 450 }], [500]);
-    byId("voice-chips").dispatch("click", { target: { dataset: { vi: "0" } } });
-    await sleep(60);
+    await byId("voice-chips").dispatch("click", { target: { dataset: { vi: "0" } } });
     const refused = /not spoken/i.test(byId("voice-note").textContent) &&
       !(pw.state.budget.rows || []).some((r) => r.name === "ghost") &&
       !byId("voice-chips").innerHTML.includes("disabled");
     const noteNow = byId("voice-note").textContent;
     V.renderChips([{ op: "ask_clarification", question: "How much for rent?" }], [500]);
-    byId("voice-chips").dispatch("click", { target: { dataset: { vi: "0" } } });
-    await sleep(40);
+    await byId("voice-chips").dispatch("click", { target: { dataset: { vi: "0" } } });
     const ask = V.state().pending === 1 &&
       !byId("voice-chips").innerHTML.includes("disabled") &&
       byId("voice-note").textContent === noteNow;
@@ -1425,8 +1417,7 @@ async function runMode(mode) {
     const n0 = pw.AGENT.journal.length;
     pw.setAiArea("app", true);
     V.renderChips([{ op: "add_note", text: "Call the landlord about rent" }], []);
-    byId("voice-chips").dispatch("click", { target: { dataset: { vi: "0" } } });
-    await sleep(60);
+    await byId("voice-chips").dispatch("click", { target: { dataset: { vi: "0" } } });
     const j = pw.AGENT.journal[pw.AGENT.journal.length - 1];
     const list = byId("journal-list").innerHTML;
     pw.setAiArea("app", false);

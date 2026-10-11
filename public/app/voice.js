@@ -1043,8 +1043,11 @@
       const t = e && e.target ? e.target : null;
       const vi = t && t.dataset ? t.dataset.vi : null;
       if (vi == null || vi === "") return;
-      if (String(vi) === "undo") { voiceUndo(); return; }
-      voiceApply(Number(vi));
+      /* Returning the promise changes nothing for the browser (an event
+         handler's value is ignored) but lets the headless suite await the
+         apply instead of guessing how long the save takes. */
+      if (String(vi) === "undo") return voiceUndo();
+      return voiceApply(Number(vi));
     });
     if (typeof document.addEventListener === "function")
       document.addEventListener("keydown", voiceHotkey, true);

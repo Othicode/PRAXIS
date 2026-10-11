@@ -1845,6 +1845,7 @@ let AGENT = {
   messages: [], journal: [], voice: false, seq: 1, jseq: 1, ui: {},
 };
 let AGENT_BUSY = false;
+let AGENT_HALTED = false;     // the owner pressed ■: finish this step, then halt
 let AGENT_LAST_CALL = 0;
 const AGENT_FILES = {};     // generated reports: fid -> {name, mime, bytes}
 
@@ -2300,24 +2301,149 @@ function agentBriefHtml() {
 const AGENT_SEEN = new WeakSet();
 const AGENT_SEEN_CARDS = new WeakSet();
 
+/* ---------- reply text → HTML ----------
+   Models answer in Markdown, and raw asterisks read like a terminal. Every
+   character is escaped *before* the renderer looks at it, so text a model
+   says can never become markup — the worst case is ugly, never active. */
+function agentInline(t) {
+  return String(t)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+    .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+}
+function agentMd(raw) {
+  const src = String(raw || "");
+  if (!/[*`#>]|\n\s*([-*•]|\d+[.)])\s/.test(src))  // plain text: cheapest path
+    return esc(src).replace(/\n/g, "<br>");
+  const lines = esc(src).split("\n");
+  const out = [];
+  let list = null, para = [], quote = [], code = null;
+  const flushPara = () => { if (para.length) { out.push("<p>" + para.join("<br>") + "</p>"); para = []; } };
+  const flushQuote = () => { if (quote.length) { out.push("<blockquote>" + quote.join("<br>") + "</blockquote>"); quote = []; } };
+  const flushList = () => {
+    if (!list) return;
+    out.push(`<${list.t}>` + list.items.map((i) => `<li>${i}</li>`).join("") + `</${list.t}>`);
+    list = null;
+  };
+  const flushAll = () => { flushPara(); flushQuote(); flushList(); };
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (code !== null) {
+      if (/^\s*```/.test(l)) { out.push("<pre><code>" + code.join("\n") + "</code></pre>"); code = null; }
+      else code.push(l);
+      continue;
+    }
+    if (/^\s*```/.test(l)) { flushAll(); code = []; continue; }
+    const q = l.match(/^&gt;\s?(.*)$/);
+    if (q) { flushPara(); flushList(); quote.push(q[1]); continue; }
+    const h = l.match(/^(#{1,4})\s+(.*)$/);
+    if (h) {
+      flushAll();
+      const lvl = Math.min(6, h[1].length + 2);
+      out.push(`<h${lvl}>` + agentInline(h[2]) + `</h${lvl}>`);
+      continue;
+    }
+    const b = l.match(/^\s*[-*•]\s+(.*)$/);
+    const n = l.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (b || n) {
+      const t = b ? "ul" : "ol";
+      flushPara(); flushQuote();
+      if (!list || list.t !== t) { flushList(); list = { t: t, items: [] }; }
+      list.items.push(agentInline((b || n)[1]));
+      continue;
+    }
+    flushList(); flushQuote();
+    if (!l.trim()) flushPara(); else para.push(agentInline(l));
+  }
+  if (code !== null) out.push("<pre><code>" + code.join("\n") + "</code></pre>");
+  flushAll();
+  return out.join("");
+}
+const agentClock = (ts) => {
+  if (!ts) return "";
+  try { return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+  catch (e) { return ""; }
+};
+
+/* The composer answers for itself: send while idle, stop while the engine is
+   working, and a character count as the 1500 ceiling comes into range. */
+function agentCount() {
+  const input = $("#agent-input"), el = $("#agent-count");
+  if (!el || !input) return;
+  const n = String(input.value || "").length;
+  el.textContent = n ? `${n}/1500` : "";
+  el.classList.toggle("near", n > 1350);
+}
+function renderChatComposer() {
+  const send = $("#agent-send"), stop = $("#agent-stop"),
+        form = $("#agent-form"), input = $("#agent-input");
+  if (send) { send.disabled = AGENT_BUSY; send.classList.toggle("hidden", !!AGENT_BUSY); }
+  if (stop) stop.classList.toggle("hidden", !AGENT_BUSY);
+  if (form) form.classList.toggle("busy", !!AGENT_BUSY);
+  if (input) input.disabled = AGENT_BUSY;
+  agentCount();
+}
+/* The chip in the top bar names the model in use, so the owner is never
+   guessing which brain is answering. */
+function renderChatModel() {
+  const el = $("#chat-model-txt"), chip = $("#chat-model");
+  if (!el) return;
+  const on = aiConfigured();
+  el.textContent = on ? (aiModel() || "Attached") : "No model";
+  if (chip) chip.classList.toggle("off", !on);
+}
+/* Jump-to-latest appears only when the owner has scrolled up out of reach. */
+function agentScrollCheck() {
+  const sc = $("#agent-scroll"), jump = $("#agent-jump");
+  if (!sc || !jump) return;
+  if (CHAT_PANE === "logs" || sc.classList.contains("hidden")) {
+    jump.classList.add("hidden");
+    return;
+  }
+  const away = typeof sc.scrollHeight === "number" && typeof sc.scrollTop === "number"
+    && (sc.scrollHeight - sc.scrollTop - (sc.clientHeight || 0)) > 220;
+  jump.classList.toggle("hidden", !away);
+}
+function agentJump() {
+  const sc = $("#agent-scroll");
+  if (sc && sc.scrollTo) sc.scrollTo({ top: sc.scrollHeight, behavior: "smooth" });
+  else if (sc) sc.scrollTop = sc.scrollHeight;
+  agentScrollCheck();
+}
+
 function renderAgent() {
   const box = $("#agent-msgs");
   if (!box) return;
   const msgs = AGENT.messages;
   if (!msgs.length) {
+    const sugs = agentChips().map((c, i) => {
+      const icon = c.act === "open-ai" ? "🤖"
+        : ["📈", "🧾", "🎯", "🔔", "💰", "🏬"][i % 6];
+      const sub = c.act === "open-ai" ? "Attach a model on this device"
+        : "Reads the books, then answers";
+      const attr = c.act
+        ? `data-agent-act="${esc(c.act)}"` : `data-agent-chip="${esc(c.text)}"`;
+      return `<button type="button" class="agent-sug" ${attr}>
+        <i>${icon}</i><span><b>${esc(c.text)}</b><small>${esc(sub)}</small></span></button>`;
+    }).join("");
     box.innerHTML = `<div class="agent-empty">
       <div class="agent-empty-ico">✦</div>
       <b>What should I do?</b>
       <p>Ask in plain words. Reads happen straight away; anything that changes a
          record waits for your approval first.</p>
       ${agentBriefHtml()}
-      <div class="agent-chips">
-        ${agentChips().map((c) => c.act
-          ? `<button type="button" class="agent-chip" data-agent-act="${esc(c.act)}">${esc(c.text)}</button>`
-          : `<button type="button" class="agent-chip" data-agent-chip="${esc(c.text)}">${esc(c.text)}</button>`).join("")}
-      </div></div>`;
+      <div class="agent-sugs">${sugs}</div>
+      </div>`;
   } else {
+    /* The last visible message earns the trailing controls: regenerate for a
+       reply, edit-and-resend for the question that produced it. */
+    let last = null;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i] && !msgs[i].hidden) { last = msgs[i]; break; }
+    }
     box.innerHTML = msgs.map((m) => {
+      if (!m) return "";
       if (m.hidden) return "";
       if (m.role === "system")
         return `<div class="agent-sys">${esc(m.text)}</div>`;
@@ -2335,9 +2461,20 @@ function renderAgent() {
              <button type="button" class="btn primary small" data-agent-act="approve-all"
                data-mid="${m.mid || 0}">Approve all ${pend}</button>
            </div>` : "";
-      const speak = side === "bot" && m.text
-        ? `<button type="button" class="agent-say" data-agent-act="speak"
-             data-mid="${m.mid || 0}" aria-label="Read aloud">🔈</button>` : "";
+      const isLast = m === last && !AGENT_BUSY;
+      const act = (kind, ico, label, extra) => `<button type="button" class="agent-act"
+          data-agent-act="${kind}" data-mid="${m.mid || 0}"
+          aria-label="${label}" title="${label}"${extra || ""}>${ico}</button>`;
+      const tools = [];
+      if (m.text) {
+        tools.push(act("copy", "⧉", "Copy"));
+        if (side === "bot") tools.push(act("speak", "🔈", "Read aloud"));
+      }
+      if (side === "bot" && isLast && !m.retry && !(m.cards || []).length)
+        tools.push(act("regen", "↻", "Regenerate"));
+      if (side === "me" && isLast) tools.push(act("edit", "✎", "Edit and resend"));
+      const bar = tools.length
+        ? `<div class="agent-acts">${tools.join("")}</div>` : "";
       const retry = side === "bot" && m.retry
         ? `<button type="button" class="btn ghost small agent-retry"
              data-agent-act="retry" data-mid="${m.mid || 0}">Try again</button>` : "";
@@ -2347,9 +2484,15 @@ function renderAgent() {
         : "";
       const av = side === "bot"
         ? `<span class="agent-av" aria-hidden="true">✦</span>` : "";
+      const when = agentClock(m.ts);
+      const who = side === "bot"
+        ? `<div class="agent-who"><b>Assistant</b>${when ? `<time>${when}</time>` : ""}</div>` : "";
+      const body = side === "bot"
+        ? `<div class="agent-bubble bot md">${m.text ? agentMd(m.text) : ""}</div>`
+        : `<div class="agent-bubble me">${m.text ? esc(m.text) : ""}${when ? `<time>${when}</time>` : ""}</div>`;
       return `<div class="agent-row ${side}${fresh ? " fresh" : ""}">${av}
         <div class="agent-col">
-          <div class="agent-bubble">${m.text ? esc(m.text) : ""}${speak}</div>
+          ${who}${body}${bar}
           ${retry}${cards}${bulk}${follow}
         </div></div>`;
     }).join("");
@@ -2357,16 +2500,20 @@ function renderAgent() {
       box.insertAdjacentHTML("beforeend",
         `<div class="agent-row bot">
            <span class="agent-av" aria-hidden="true">✦</span>
-           <div class="agent-col"><div class="agent-bubble typing"><i></i><i></i><i></i></div></div>
+           <div class="agent-col"><div class="agent-bubble bot typing"><i></i><i></i><i></i><span>Thinking…</span></div></div>
          </div>`);
   }
   renderAgentStatus();
-  const input = $("#agent-input");
-  const send = $("#agent-send");
-  if (send) send.disabled = AGENT_BUSY;
-  if (input) input.disabled = AGENT_BUSY;
+  renderChatComposer();
   const scroller = $("#agent-scroll") || box;
-  if (scroller && scroller.scrollTop != null) scroller.scrollTop = scroller.scrollHeight;
+  if (scroller && scroller.scrollTop != null && !AGENT_BUSY) {
+    /* Only pull the view down if the owner is already at the bottom — never
+       yank someone away who is reading an older answer. */
+    const away = typeof scroller.scrollHeight === "number"
+      && (scroller.scrollHeight - scroller.scrollTop - (scroller.clientHeight || 0)) > 220;
+    if (!away) scroller.scrollTop = scroller.scrollHeight;
+  }
+  agentScrollCheck();
 }
 
 function renderAgentStatus() {
@@ -2375,6 +2522,7 @@ function renderAgentStatus() {
   const s = aiStatus();
   const pill = $("#agent-pill");
   if (pill) pill.classList.toggle("on", aiConfigured());
+  renderChatModel();
   // Cards wait in whichever chat they were left — count every session, and
   // light the badge even with no model attached: approving is a local act.
   const msgs = AGENT.sessions.length
@@ -2433,6 +2581,7 @@ function showChatPane(which) {
   $$(".chat-link").forEach((b) => b.classList.toggle("active", b.dataset.clink === which));
   CHAT_PANE = which;
   if (logs) renderJournal();
+  agentScrollCheck();
 }
 
 /* The sidebar's user row mirrors the top bar's shop identity. */
@@ -2776,8 +2925,9 @@ async function agentLoop(maxTurns) {
   try {
     renderAgent();
     for (let i = 0; i < (maxTurns || AGENT_TURNS); i++) {
+      if (AGENT_HALTED) break;             // ■ pressed: no further turn starts
       const turn = await agentTurn();
-      const msg = { role: "assistant", text: turn.reply, cards: [], mid: AGENT.seq++ };
+      const msg = { role: "assistant", text: turn.reply, cards: [], mid: AGENT.seq++, ts: Date.now() };
       AGENT.messages.push(msg);
       /* Voice on means *read my replies*, not "make me press 🔈 every time" —
          the previous utterance is cancelled by agentSpeak before this one. */
@@ -2827,6 +2977,7 @@ async function agentLoop(maxTurns) {
     AGENT.messages.push({ role: "assistant", text: `Something went wrong: ${e.message}` });
   } finally {
     AGENT_BUSY = outer;
+    AGENT_HALTED = false;
     saveAgent();
     try { renderAgent(); } catch (e) { /* never strand the panel busy */ }
   }
@@ -2835,7 +2986,7 @@ async function agentLoop(maxTurns) {
 async function agentSend(text) {
   const t = String(text || "").trim();
   if (!t || AGENT_BUSY) return;
-  AGENT.messages.push({ role: "user", text: t, mid: AGENT.seq++ });
+  AGENT.messages.push({ role: "user", text: t, mid: AGENT.seq++, ts: Date.now() });
   const sess = activeSession();
   if (sess) sess.ts = Date.now();       // sending is activity: bump it up the list
   const input = $("#agent-input");
@@ -2981,6 +3132,48 @@ async function agentRetry(mid) {
   saveAgent();
   renderAgent();
   await agentLoop(1);
+}
+
+/* ---------- the three controls every chat has ---------- */
+/* ■ Stop. The request already on the wire cannot be recalled, but no second
+   turn starts — the thread keeps whatever the answer had reached. */
+function agentStop() {
+  if (!AGENT_BUSY) return;
+  AGENT_STOP = true;
+  toast("Stopping… the answer in progress will be kept");
+}
+
+/* ↻ Regenerate: take the last reply off the thread and ask again. Only the
+   last message qualifies, and never one still holding an approval card —
+   a proposal waiting on the owner is not something to quietly re-roll. */
+async function agentRegen(mid) {
+  if (AGENT_BUSY) return;
+  const i = AGENT.messages.findIndex((m) => m && m.mid === mid && m.role === "assistant");
+  if (i < 0 || i !== AGENT.messages.length - 1) return;
+  const m = AGENT.messages[i];
+  if (m.retry || (m.cards || []).length) return;
+  AGENT.messages.splice(i, 1);
+  saveAgent();
+  renderAgent();
+  await agentLoop();
+}
+
+/* ✎ Edit and resend: put the last question back in the composer and take the
+   answer it produced off the thread, exactly like ChatGPT's edit. */
+function agentEditUser(mid) {
+  if (AGENT_BUSY) return;
+  const i = AGENT.messages.findIndex((m) => m && m.mid === mid && m.role === "user");
+  if (i < 0 || i !== AGENT.messages.length - 1) return;
+  const m = AGENT.messages[i];
+  const input = $("#agent-input");
+  if (input) {
+    input.value = String(m.text || "");
+    agentAutogrow();
+    if (input.focus) input.focus();
+  }
+  AGENT.messages.splice(i, 1);
+  saveAgent();
+  renderAgent();
 }
 
 /* ---------- building an approval card ---------- */
@@ -3937,6 +4130,34 @@ function agentSpeak(mid) {
   } catch (e) { /* voice is a courtesy */ }
 }
 
+/* Standard chat affordance (ChatGPT/Claude/DeepSeek all have it): copy the
+   reply text. Read-only — touches no record, no history, no coverage. */
+function agentCopy(mid) {
+  const m = AGENT.messages.find((x) => String(x.mid) === String(mid));
+  if (!m || !m.text) return;
+  const done = () => toast("Copied ✓");
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText)
+      navigator.clipboard.writeText(m.text).then(done, () => agentCopyFallback(m.text, done));
+    else agentCopyFallback(m.text, done);
+  } catch (e) { agentCopyFallback(m.text, done); }
+}
+function agentCopyFallback(text, done) {
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand ? document.execCommand("copy") : false;
+    if (ta.parentNode) ta.parentNode.removeChild(ta);
+    if (ok) { done(); return; }
+  } catch (e) { /* fall through to the hint */ }
+  toast("Copy is blocked — select the text by hand", "err");
+}
+
 function agentToggleVoice() {
   AGENT.voice = !AGENT.voice;
   saveAgent();
@@ -4842,6 +5063,8 @@ function bindAll() {
   /* --- the chat view: sidebar drawer, section links, user menu --- */
   const chatBurger = $("#chat-burger");
   if (chatBurger) chatBurger.addEventListener("click", () => toggleChatSidebar());
+  const chatClose = $("#chat-close");
+  if (chatClose) chatClose.addEventListener("click", () => switchView("dashboard"));
   const chatCollapse = $("#chat-collapse");
   if (chatCollapse) chatCollapse.addEventListener("click", () => toggleChatSidebar());
   const chatScrim = $("#chat-scrim");
@@ -4965,16 +5188,28 @@ function bindAll() {
   });
   const agentInput = $("#agent-input");
   if (agentInput) {
-    agentInput.addEventListener("input", agentAutogrow);
+    agentInput.addEventListener("input", () => { agentAutogrow(); agentCount(); });
     agentInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         const f = $("#agent-form");
         if (f && f.requestSubmit) f.requestSubmit();
         else agentSend(e.target.value);
+      } else if (e.key === "Escape" && AGENT_BUSY) {
+        agentStop();                       // Esc while it works = same as ■
       }
     });
   }
+
+  /* --- the composer's own controls: stop, jump back to the newest answer --- */
+  const agentStopBtn = $("#agent-stop");
+  if (agentStopBtn) agentStopBtn.addEventListener("click", agentStop);
+  const agentJumpBtn = $("#agent-jump");
+  if (agentJumpBtn) agentJumpBtn.addEventListener("click", agentJump);
+  const agentScroll = $("#agent-scroll");
+  if (agentScroll) agentScroll.addEventListener("scroll", agentScrollCheck);
+  const chatModel = $("#chat-model");
+  if (chatModel) chatModel.addEventListener("click", openAiDialog);
 
   /* Every button inside the conversation is reached through this one
      listener: the list is rebuilt on every message, so per-button binds
@@ -4992,8 +5227,11 @@ function bindAll() {
       agentDecide(act.getAttribute("data-aid"), kind === "approve");
     else if (kind === "approve-all") agentApproveAll(act.getAttribute("data-mid"));
     else if (kind === "retry") agentRetry(Number(act.getAttribute("data-mid")));
+    else if (kind === "regen") agentRegen(Number(act.getAttribute("data-mid")));
+    else if (kind === "edit") agentEditUser(Number(act.getAttribute("data-mid")));
     else if (kind === "open-ai") openAiDialog();
     else if (kind === "speak") agentSpeak(act.getAttribute("data-mid"));
+    else if (kind === "copy") agentCopy(act.getAttribute("data-mid"));
     else if (kind === "download") {
       const f = AGENT_FILES[act.getAttribute("data-fid")];
       if (f) { if (downloadFile(f.name, f.mime, f.bytes)) toast("⤓ " + f.name); else toast("This browser blocked the download", "err"); }

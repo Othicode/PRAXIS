@@ -375,13 +375,18 @@ setTimeout(function () {
         <div class="chat-menu chat-row-menu hidden" id="chat-row-menu" role="menu"></div>
       </aside>
       <div class="chat-main">
+        <!-- Top bar: who you are talking to, what it can reach, and the way out -->
         <header class="chat-topbar">
           <button type="button" class="icon-btn chat-burger" id="chat-burger" aria-label="Open chats" title="Chats">☰</button>
-          <div class="chat-title" id="chat-title">New chat</div>
-          <span class="agent-pill" id="agent-pill"><i class="agent-dot"></i><span id="agent-status">…</span></span>
+          <div class="chat-headline">
+            <div class="chat-title" id="chat-title">New chat</div>
+            <span class="agent-pill" id="agent-pill"><i class="agent-dot"></i><span id="agent-status">…</span></span>
+          </div>
           <span class="chat-head-acts">
+            <button class="chat-model" id="chat-model" type="button" aria-label="Model and AI settings" title="Model and AI settings"><i class="agent-dot"></i><span id="chat-model-txt">…</span></button>
             <button class="icon-btn" id="agent-voice" type="button" aria-label="Read replies aloud" aria-pressed="false" title="Read replies aloud">🔊</button>
             <button class="icon-btn" id="agent-settings" type="button" aria-label="AI settings" title="AI settings">⚙️</button>
+            <button class="icon-btn" id="chat-close" type="button" aria-label="Close assistant" title="Close assistant">✕</button>
           </span>
         </header>
         <div class="chat-pane">
@@ -395,7 +400,9 @@ setTimeout(function () {
             </div>
             <div class="journal-list" id="journal-list"></div>
           </div>
+          <button type="button" class="agent-jump hidden" id="agent-jump" aria-label="Jump to the latest message" title="Jump to latest">↓</button>
         </div>
+        <!-- Composer: attach, type, speak, send — and a way to stop mid-run -->
         <form class="agent-form" id="agent-form" autocomplete="off">
           <div class="agent-composer">
             <button type="button" class="icon-btn agent-cbtn" id="agent-attach-btn" aria-label="Attach a photo or file" title="Attach a photo or file">📎</button>
@@ -404,9 +411,13 @@ setTimeout(function () {
               aria-label="Message the assistant"></textarea>
             <button type="button" class="icon-btn agent-cbtn" id="agent-mic" aria-label="Speak" title="Speak">🎤</button>
             <button type="submit" class="agent-send" id="agent-send" aria-label="Send">➤</button>
+            <button type="button" class="agent-stop hidden" id="agent-stop" aria-label="Stop generating" title="Stop generating">■</button>
+          </div>
+          <div class="agent-under">
+            <p class="agent-note"><b>Enter</b> send · <b>Shift+Enter</b> new line · reads run straight away, anything that changes a record waits for your approval</p>
+            <span class="agent-count" id="agent-count" aria-live="polite"></span>
           </div>
           <input type="file" id="agent-file" accept="image/*,.csv,.txt,.json,text/*" class="hidden">
-          <p class="agent-note">reads run straight away · anything that changes a record waits for your approval</p>
         </form>
       </div>
     </div>
